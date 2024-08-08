@@ -12,9 +12,12 @@
     in {
       # For `nix develop`:
       devShell = forAllSystems (system:
-        let pkgs = (import nixpkgs) { inherit system; };
+        let
+	  pkgs = (import nixpkgs) { inherit system; };
+          rust-pkgs = fenix.packages.${system}.stable;
         in pkgs.mkShell {
-          nativeBuildInputs = with fenix.packages.${system}.stable; [ rustc cargo rustfmt clippy rust-analyzer ];
+          nativeBuildInputs = with rust-pkgs; [ rustc cargo rustfmt clippy rust-analyzer ];
+          RUST_SRC_PATH = "${rust-pkgs.rust-src}/lib/rustlib/src/rust/library";
         });
     };
 }
