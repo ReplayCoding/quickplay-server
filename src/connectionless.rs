@@ -74,7 +74,7 @@ fn handle_c2s_connect(
     if server_challenge != get_challenge_for_address(packet.from) {
         reject_connection(packet, client_challenge, "#GameUI_ServerRejectBadChallenge")?;
         return Err(anyhow!(
-            "Mismatched server challenge: {} != {}",
+            "mismatched server challenge: {} != {}",
             server_challenge,
             get_challenge_for_address(packet.from)
         ));
@@ -82,18 +82,18 @@ fn handle_c2s_connect(
 
     if protocol_version != PROTOCOL_VERSION {
         reject_connection(packet, client_challenge, "Unexpected protocol version")?;
-        return Err(anyhow!("Unexpected protocl version: {protocol_version}"));
+        return Err(anyhow!("unexpected protocl version: {protocol_version}"));
     }
 
     if auth_protocol != AUTH_PROTOCOL_HASHEDCDKEY {
         reject_connection(
             packet,
             client_challenge,
-            "Unexpected authentication protocol",
+            "unexpected authentication protocol",
         )?;
 
         return Err(anyhow!(
-            "Unexpected authentication protocol: {}",
+            "unexpected authentication protocol: {}",
             auth_protocol
         ));
     }
