@@ -1,4 +1,6 @@
 mod connectionless;
+mod netchannel;
+mod string_io;
 
 use std::{
     borrow::Cow,
@@ -41,11 +43,7 @@ fn decode_raw_packet(packet_data: &[u8]) -> anyhow::Result<Cow<'_, [u8]>> {
     Ok(Cow::Borrowed(packet_data))
 }
 
-fn process_packet<'a>(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    packet_data: &[u8],
-) -> anyhow::Result<()> {
+fn process_packet(socket: &UdpSocket, from: SocketAddr, packet_data: &[u8]) -> anyhow::Result<()> {
     let packet_data = decode_raw_packet(packet_data)?;
 
     let header_flags = packet_data
@@ -59,7 +57,9 @@ fn process_packet<'a>(
     };
 
     if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-        connectionless::process_connectionless_packet(&packet_info)?;
+        if let Some(_netchan) = connectionless::process_connectionless_packet(&packet_info)? {
+            debug!("created netchannel for client {:?}", from);
+        };
     } else {
         todo!("netchannels");
     }
