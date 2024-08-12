@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use log::trace;
 
-use crate::{netchannel::NetChannel, string_io::write_string, PacketInfo, CONNECTIONLESS_HEADER};
+use crate::{io_util::write_string, netchannel::NetChannel, PacketInfo, CONNECTIONLESS_HEADER};
 
 const PROTOCOL_VERSION: u32 = 24;
 const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;
@@ -115,7 +115,7 @@ fn handle_c2s_connect(
 
     packet.send(&response_cursor.into_inner())?;
 
-    Ok(NetChannel::new())
+    Ok(NetChannel::new(server_challenge))
 }
 
 pub fn process_connectionless_packet(packet: &PacketInfo) -> anyhow::Result<Option<NetChannel>> {
