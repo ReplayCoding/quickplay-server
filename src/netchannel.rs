@@ -3,7 +3,7 @@ use std::io::Cursor;
 use anyhow::anyhow;
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, LittleEndian};
-use log::trace;
+use tracing::trace;
 
 use crate::io_util::{read_string, read_varint32};
 
@@ -115,7 +115,6 @@ impl NetChannel {
             }
         }
 
-        // FIXME: incorrect calculation i think?
         if ((u64::try_from(packet.len())? * 8) - reader.position_in_bits()?) > 0 {
             trace!(
                 "process remaining messages: {} > {}",

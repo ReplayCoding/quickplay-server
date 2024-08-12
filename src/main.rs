@@ -10,8 +10,8 @@ use std::{
 };
 
 use anyhow::anyhow;
-use log::{info, trace, warn};
 use netchannel::NetChannel;
+use tracing::{info, span, trace, warn};
 
 const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
 const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
@@ -104,7 +104,7 @@ fn process_packet(
 }
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
 
     let socket = UdpSocket::bind("127.0.0.2:4444")?;
     info!("bound to address {:?}", socket.local_addr()?);
@@ -116,13 +116,17 @@ fn main() -> anyhow::Result<()> {
         let (packet_size, addr) = socket.recv_from(&mut packet_data)?;
         let packet_data = &packet_data[..packet_size];
 
-        trace!("got packet of size {} from {:?}", packet_size, addr);
+        let _span = span!(tracing::Level::TRACE, "process packet", "{}", addr.to_string());
 
-        if let Err(err) = process_packet(&mut connections, &socket, addr, packet_data) {
-            warn!(
-                "error occured while handling packet from {:?}: {:?}",
-                addr, err
-            );
-        };
+        _span.in_scope(|| {
+            trace!("got packet of size {} from {:?}", packet_size, addr);
+
+            if let Err(err) = process_packet(&mut connections, &socket, addr, packet_data) {
+                warn!(
+                    "error occured while handling packet from {:?}: {:?}",
+                    addr, err
+                );
+            };
+        });
     }
 }

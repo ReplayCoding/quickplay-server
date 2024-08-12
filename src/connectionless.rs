@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::anyhow;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
-use log::trace;
+use tracing::trace;
 
 use crate::{io_util::write_string, netchannel::NetChannel, PacketInfo, CONNECTIONLESS_HEADER};
 
