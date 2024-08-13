@@ -1,6 +1,7 @@
 // TODO: this file needs to be cleaned up
 mod connectionless;
 mod io_util;
+mod message;
 mod netchannel;
 
 use std::{
@@ -11,7 +12,7 @@ use std::{
 
 use anyhow::anyhow;
 use netchannel::NetChannel;
-use tracing::{info, span, trace, warn};
+use tracing::{debug, info, span, trace, warn};
 
 const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
 const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
@@ -89,11 +90,14 @@ fn process_packet(
         };
 
         if let Some(netchan) = connectionless::process_connectionless_packet(&packet_info)? {
-            trace!("created netchannel for client {:?}", from);
+            debug!("created netchannel for client {:?}", from);
             connections.insert(from, netchan);
         };
     } else if let Some(netchan) = connections.get_mut(&from) {
-        let _messages = netchan.get_messages(&packet_data)?;
+        netchan.process_packet(&packet_data, &mut |message| {
+            debug!("got message {:?}", message);
+            Ok(())
+        })?;
     } else {
         return Err(anyhow!(
             "got netchannel message, but no connection with client"
@@ -116,7 +120,12 @@ fn main() -> anyhow::Result<()> {
         let (packet_size, addr) = socket.recv_from(&mut packet_data)?;
         let packet_data = &packet_data[..packet_size];
 
-        let _span = span!(tracing::Level::TRACE, "process packet", "{}", addr.to_string());
+        let _span = span!(
+            tracing::Level::ERROR,
+            "process packet",
+            "{}",
+            addr.to_string()
+        );
 
         _span.in_scope(|| {
             trace!("got packet of size {} from {:?}", packet_size, addr);
