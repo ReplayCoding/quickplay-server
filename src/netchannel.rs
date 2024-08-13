@@ -1,8 +1,11 @@
-use std::io::Cursor;
+use std::{
+    io::Cursor,
+    net::{SocketAddr, UdpSocket},
+};
 
 use anyhow::anyhow;
 use bitflags::bitflags;
-use bitstream_io::{BitRead, BitReader, LittleEndian};
+use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tracing::trace;
 
 use crate::{io_util::read_varint32, message::Message};
@@ -16,7 +19,10 @@ const MAX_STREAMS: usize = 2; // 0 == regular, 1 == file stream
 const FRAGMENT_BITS: u32 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
 
-const NETMSG_TYPE_BITS: u32 = 6;
+// Also used by Message::write
+pub const NETMSG_TYPE_BITS: u32 = 6;
+
+const MIN_PACKET_SIZE: usize = 16;
 
 bitflags! {
     #[derive(Debug)]
@@ -58,13 +64,13 @@ impl ReceivedData {
 }
 
 pub struct NetChannel {
-    _out_sequence_nr: u32,
+    out_sequence_nr: u32,
     out_sequence_nr_ack: u32,
 
     in_sequence_nr: u32,
 
     _out_reliable_state: u32, // we *probably* don't need this
-    in_reliable_state: u32,
+    in_reliable_state: u8,
 
     has_seen_challenge: bool,
     challenge: u32,
@@ -75,7 +81,7 @@ pub struct NetChannel {
 impl NetChannel {
     pub fn new(challenge: u32) -> Self {
         Self {
-            _out_sequence_nr: 1,
+            out_sequence_nr: 1,
             out_sequence_nr_ack: 0,
 
             in_sequence_nr: 0,
@@ -154,11 +160,8 @@ impl NetChannel {
             // to make sure that the current BitReader position is aligned.
             debug_assert!(reader.byte_aligned(), "message reader is not byte aligned");
 
-            let crc_hasher = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
-            let calculated_digest =
-                crc_hasher.checksum(&packet[(reader.position_in_bits()? / 8) as usize..]);
-            let calculated_checksum =
-                (((calculated_digest >> 16) ^ calculated_digest) & 0xffff) as u16;
+            let bytes_to_checksum = &packet[usize::try_from(reader.position_in_bits()? / 8)?..];
+            let calculated_checksum = calculate_checksum(bytes_to_checksum);
 
             if calculated_checksum != expected_checksum {
                 return Err(anyhow!(
@@ -357,8 +360,7 @@ impl NetChannel {
         F: FnMut(&Message) -> anyhow::Result<()>,
     {
         loop {
-            if ((u64::try_from(data_len)? * 8) - reader.position_in_bits()?)
-                < NETMSG_TYPE_BITS.into()
+            if (u64::try_from(data_len)? * 8) - reader.position_in_bits()? < NETMSG_TYPE_BITS.into()
             {
                 // No more messages
                 break;
@@ -372,4 +374,59 @@ impl NetChannel {
 
         Ok(())
     }
+
+    // TODO: dumb prototype implementation that needs to be rewritten. This can't take a byte buffer, since everything is bit-aligned
+    pub fn send_packet(
+        &mut self,
+        socket: &UdpSocket,
+        addr: SocketAddr,
+        data: &[u8],
+    ) -> anyhow::Result<()> {
+        let mut buffer: Vec<u8> = vec![];
+        let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
+
+        writer.write_out::<32, _>(self.out_sequence_nr)?;
+        writer.write_out::<32, _>(self.in_sequence_nr)?;
+
+        writer.write_out::<8, _>(PacketFlags::PACKET_FLAG_CHALLENGE.bits())?;
+
+        // NOTE: this is really Stupid, i shouldn't have to manually calculate this.
+        let checksum_offs: usize = (32 + 32 + 8) / 8;
+        writer.write_out::<16, _>(0)?; // write out dummy checksum, will overwrite later
+
+        writer.write_out::<8, _>(self.in_reliable_state)?;
+
+        // always write out challenge
+        writer.write_out::<32, _>(self.challenge)?;
+
+        writer.write_bytes(data)?;
+
+        // pad out data so everything is written. this *should* be fine to use,
+        // since it should translate to a net_NOP at worst. i think. hopefully.
+        writer.byte_align()?;
+
+        // apparently, some routers don't like packets that are too small
+        if buffer.len() < MIN_PACKET_SIZE {
+            buffer.resize(MIN_PACKET_SIZE, 0);
+        }
+
+        // should never panic because we've already written the dummy checksum.
+        // at worst we get an empty slice
+        let bytes_to_checksum = &buffer[checksum_offs + 2..];
+        let checksum = calculate_checksum(bytes_to_checksum).to_le_bytes();
+
+        buffer[checksum_offs] = checksum[0];
+        buffer[checksum_offs + 1] = checksum[1];
+
+        socket.send_to(&buffer, addr)?;
+
+        Ok(())
+    }
+}
+
+fn calculate_checksum(bytes: &[u8]) -> u16 {
+    let crc_hasher = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
+    let calculated_digest = crc_hasher.checksum(bytes);
+    let calculated_checksum = (((calculated_digest >> 16) ^ calculated_digest) & 0xffff) as u16;
+    calculated_checksum
 }

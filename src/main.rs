@@ -7,10 +7,13 @@ mod netchannel;
 use std::{
     borrow::Cow,
     collections::HashMap,
+    io::Cursor,
     net::{SocketAddr, UdpSocket},
 };
 
 use anyhow::anyhow;
+use bitstream_io::{BitWrite, BitWriter, LittleEndian};
+use message::Message;
 use netchannel::NetChannel;
 use tracing::{debug, info, span, trace, warn};
 
@@ -94,10 +97,37 @@ fn process_packet(
             connections.insert(from, netchan);
         };
     } else if let Some(netchan) = connections.get_mut(&from) {
+        let mut should_send_print = false;
         netchan.process_packet(&packet_data, &mut |message| {
             debug!("got message {:?}", message);
+            if let Message::SignonState(_) = message {
+                should_send_print = true;
+            }
             Ok(())
         })?;
+
+        if should_send_print {
+            debug!("Sending print");
+            let message = Message::Print(message::MessagePrint {
+                text: "TEST TEST TEST 🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸\n".to_string(),
+            });
+
+            let mut buffer: Vec<u8> = vec![];
+            let mut writer = BitWriter::endian(
+                Cursor::new(&mut buffer),
+                LittleEndian,
+            );
+            message.write(&mut writer)?;
+
+            let message = Message::StringCmd(message::MessageStringCmd {
+                command: "redirect nyc-1.us.uncletopia.com:27025\n".to_string(),
+            });
+            message.write(&mut writer)?;
+
+            writer.byte_align()?;
+
+            netchan.send_packet(socket, from, &buffer)?;
+        }
     } else {
         return Err(anyhow!(
             "got netchannel message, but no connection with client"

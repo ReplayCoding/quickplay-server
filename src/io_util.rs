@@ -1,4 +1,5 @@
 use bitstream_io::{BitRead, BitWrite};
+use tracing::trace;
 
 pub fn write_string<W: BitWrite>(reader: &mut W, string: &str) -> std::io::Result<()> {
     reader.write_bytes(string.as_bytes())?;
@@ -48,4 +49,18 @@ pub fn read_varint32<R: BitRead>(reader: &mut R) -> anyhow::Result<u32> {
     }
 
     Ok(result)
+}
+
+#[test]
+fn test_string() {
+    use bitstream_io::{BitReader, BitWriter, LittleEndian};
+    use std::io::Cursor;
+
+    let mut buffer: Vec<u8> = vec![];
+
+    let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
+    write_string(&mut writer, "TEST TEST TEST").expect("writes should work");
+
+    let mut reader = BitReader::endian(Cursor::new(&mut buffer), LittleEndian);
+    read_string(&mut reader, 1024).expect("reads should work");
 }
