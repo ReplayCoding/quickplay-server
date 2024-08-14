@@ -8,7 +8,7 @@ use anyhow::anyhow;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tracing::trace;
 
-use crate::{io_util::write_string, netchannel::NetChannel, CONNECTIONLESS_HEADER};
+use crate::{io_util::write_string, CONNECTIONLESS_HEADER};
 
 const PROTOCOL_VERSION: u32 = 24;
 const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;
@@ -71,7 +71,7 @@ fn handle_c2s_connect(
     socket: &UdpSocket,
     from: SocketAddr,
     reader: &mut BitReader<Cursor<&[u8]>, LittleEndian>,
-) -> anyhow::Result<NetChannel> {
+) -> anyhow::Result<u32> {
     let protocol_version: u32 = reader.read_in::<32, _>()?;
     let auth_protocol: u32 = reader.read_in::<32, _>()?;
     let server_challenge: u32 = reader.read_in::<32, _>()?;
@@ -132,14 +132,17 @@ fn handle_c2s_connect(
 
     socket.send_to(&response_cursor.into_inner(), from)?;
 
-    Ok(NetChannel::new(server_challenge))
+    Ok(server_challenge)
 }
 
+/// Handle a connectionless packet. Returns a challenge number when the
+/// connection handshake has completed, which should be provided to the
+// netchannel
 pub fn process_connectionless_packet(
     socket: &UdpSocket,
     from: SocketAddr,
     data: &[u8],
-) -> anyhow::Result<Option<NetChannel>> {
+) -> anyhow::Result<Option<u32>> {
     // Cut off connectionless header
     let data = data
         .get(4..)

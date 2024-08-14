@@ -22,6 +22,8 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
+struct Connection {}
+
 fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let compression_type = packet_data
         .get(4..8)
@@ -69,9 +71,10 @@ fn process_packet(
         .ok_or_else(|| anyhow!("couldn't get header flags"))?;
 
     if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-        if let Some(netchan) =
+        if let Some(challenge) =
             connectionless::process_connectionless_packet(socket, from, &packet_data)?
         {
+            let netchan = NetChannel::new(challenge);
             debug!("created netchannel for client {:?}", from);
             connections.insert(from, netchan);
         };
