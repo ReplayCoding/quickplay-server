@@ -69,13 +69,14 @@ pub struct NetChannel {
 
     in_sequence_nr: u32,
 
-    _out_reliable_state: u32, // we *probably* don't need this
     in_reliable_state: u8,
 
     has_seen_challenge: bool,
     challenge: u32,
 
     received_data: [Option<ReceivedData>; MAX_STREAMS],
+
+    queued_unreliable_messages: Vec<Message>,
 }
 
 impl NetChannel {
@@ -86,13 +87,13 @@ impl NetChannel {
 
             in_sequence_nr: 0,
 
-            _out_reliable_state: 0,
             in_reliable_state: 0,
 
             has_seen_challenge: false,
             challenge,
 
             received_data: std::array::from_fn(|_| None),
+            queued_unreliable_messages: vec![],
         }
     }
 
@@ -375,13 +376,9 @@ impl NetChannel {
         Ok(())
     }
 
-    // TODO: dumb prototype implementation that needs to be rewritten. This can't take a byte buffer, since everything is bit-aligned
-    pub fn send_packet(
-        &mut self,
-        socket: &UdpSocket,
-        addr: SocketAddr,
-        data: &[u8],
-    ) -> anyhow::Result<()> {
+    // TODO: this should take some sort of socket wrapper that handles packet
+    // splitting and compression
+    pub fn send_packet(&mut self, socket: &UdpSocket, addr: SocketAddr) -> anyhow::Result<()> {
         let mut buffer: Vec<u8> = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
 
@@ -399,7 +396,11 @@ impl NetChannel {
         // always write out challenge
         writer.write_out::<32, _>(self.challenge)?;
 
-        writer.write_bytes(data)?;
+        // write all the messages we have queued
+        for message in &self.queued_unreliable_messages {
+            message.write(&mut writer)?;
+        }
+        self.queued_unreliable_messages = vec![];
 
         // pad out data so everything is written. this *should* be fine to use,
         // since it should translate to a net_NOP at worst. i think. hopefully.
@@ -421,6 +422,10 @@ impl NetChannel {
         socket.send_to(&buffer, addr)?;
 
         Ok(())
+    }
+
+    pub fn queue_unreliable_message(&mut self, message: Message) {
+        self.queued_unreliable_messages.push(message);
     }
 }
 

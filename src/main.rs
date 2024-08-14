@@ -7,12 +7,10 @@ mod netchannel;
 use std::{
     borrow::Cow,
     collections::HashMap,
-    io::Cursor,
     net::{SocketAddr, UdpSocket},
 };
 
 use anyhow::anyhow;
-use bitstream_io::{BitWrite, BitWriter, LittleEndian};
 use message::Message;
 use netchannel::NetChannel;
 use tracing::{debug, info, span, trace, warn};
@@ -108,25 +106,16 @@ fn process_packet(
 
         if should_send_print {
             debug!("Sending print");
-            let message = Message::Print(message::MessagePrint {
+            netchan.queue_unreliable_message(Message::Print(message::MessagePrint {
                 text: "TEST TEST TEST 🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸\n".to_string(),
-            });
+            }));
 
-            let mut buffer: Vec<u8> = vec![];
-            let mut writer = BitWriter::endian(
-                Cursor::new(&mut buffer),
-                LittleEndian,
-            );
-            message.write(&mut writer)?;
+            netchan.queue_unreliable_message(Message::StringCmd(message::MessageStringCmd {
+                command: "redirect 127.0.0.1:27015\n".to_string(),
+            }));
 
-            let message = Message::StringCmd(message::MessageStringCmd {
-                command: "redirect nyc-1.us.uncletopia.com:27025\n".to_string(),
-            });
-            message.write(&mut writer)?;
 
-            writer.byte_align()?;
-
-            netchan.send_packet(socket, from, &buffer)?;
+            netchan.send_packet(socket, from)?;
         }
     } else {
         return Err(anyhow!(
