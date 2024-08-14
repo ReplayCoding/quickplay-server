@@ -1,14 +1,14 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::Cursor,
-    net::SocketAddr,
+    net::{SocketAddr, UdpSocket},
 };
 
 use anyhow::anyhow;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tracing::trace;
 
-use crate::{io_util::write_string, netchannel::NetChannel, PacketInfo, CONNECTIONLESS_HEADER};
+use crate::{io_util::write_string, netchannel::NetChannel, CONNECTIONLESS_HEADER};
 
 const PROTOCOL_VERSION: u32 = 24;
 const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;
@@ -24,7 +24,8 @@ fn get_challenge_for_address(addr: SocketAddr) -> u32 {
 }
 
 fn reject_connection(
-    packet: &PacketInfo,
+    socket: &UdpSocket,
+    from: SocketAddr,
     client_challenge: u32,
     message: &str,
 ) -> anyhow::Result<()> {
@@ -36,14 +37,18 @@ fn reject_connection(
     response.write_out::<32, _>(client_challenge)?; // S2C_CONNREJECT
     write_string(&mut response, message)?;
 
-    packet.send(&response_cursor.into_inner())?;
+    socket.send_to(&response_cursor.into_inner(), from)?;
 
     Ok(())
 }
 
-fn handle_a2s_get_challenge<R: BitRead>(packet: &PacketInfo, reader: &mut R) -> anyhow::Result<()> {
+fn handle_a2s_get_challenge<R: BitRead>(
+    socket: &UdpSocket,
+    from: SocketAddr,
+    reader: &mut R,
+) -> anyhow::Result<()> {
     let client_challenge: u32 = reader.read_in::<32, _>()?;
-    let server_challenge = get_challenge_for_address(packet.from);
+    let server_challenge = get_challenge_for_address(from);
 
     trace!("got challenge {client_challenge:08x} from client");
 
@@ -57,13 +62,14 @@ fn handle_a2s_get_challenge<R: BitRead>(packet: &PacketInfo, reader: &mut R) -> 
     response.write_out::<32, _>(client_challenge)?;
     response.write_out::<32, _>(AUTH_PROTOCOL_HASHEDCDKEY)?;
 
-    packet.send(&response_cursor.into_inner())?;
+    socket.send_to(&response_cursor.into_inner(), from)?;
 
     Ok(())
 }
 
 fn handle_c2s_connect(
-    packet: &PacketInfo,
+    socket: &UdpSocket,
+    from: SocketAddr,
     reader: &mut BitReader<Cursor<&[u8]>, LittleEndian>,
 ) -> anyhow::Result<NetChannel> {
     let protocol_version: u32 = reader.read_in::<32, _>()?;
@@ -71,23 +77,34 @@ fn handle_c2s_connect(
     let server_challenge: u32 = reader.read_in::<32, _>()?;
     let client_challenge: u32 = reader.read_in::<32, _>()?;
 
-    if server_challenge != get_challenge_for_address(packet.from) {
-        reject_connection(packet, client_challenge, "#GameUI_ServerRejectBadChallenge")?;
+    if server_challenge != get_challenge_for_address(from) {
+        reject_connection(
+            socket,
+            from,
+            client_challenge,
+            "#GameUI_ServerRejectBadChallenge",
+        )?;
         return Err(anyhow!(
             "mismatched server challenge: {} != {}",
             server_challenge,
-            get_challenge_for_address(packet.from)
+            get_challenge_for_address(from)
         ));
     };
 
     if protocol_version != PROTOCOL_VERSION {
-        reject_connection(packet, client_challenge, "Unexpected protocol version")?;
+        reject_connection(
+            socket,
+            from,
+            client_challenge,
+            "Unexpected protocol version",
+        )?;
         return Err(anyhow!("unexpected protocl version: {protocol_version}"));
     }
 
     if auth_protocol != AUTH_PROTOCOL_HASHEDCDKEY {
         reject_connection(
-            packet,
+            socket,
+            from,
             client_challenge,
             "unexpected authentication protocol",
         )?;
@@ -113,27 +130,30 @@ fn handle_c2s_connect(
     response.write_out::<32, _>(client_challenge)?;
     write_string(&mut response, "0000000000")?; // padding
 
-    packet.send(&response_cursor.into_inner())?;
+    socket.send_to(&response_cursor.into_inner(), from)?;
 
     Ok(NetChannel::new(server_challenge))
 }
 
-pub fn process_connectionless_packet(packet: &PacketInfo) -> anyhow::Result<Option<NetChannel>> {
+pub fn process_connectionless_packet(
+    socket: &UdpSocket,
+    from: SocketAddr,
+    data: &[u8],
+) -> anyhow::Result<Option<NetChannel>> {
     // Cut off connectionless header
-    let packet_data = packet
-        .data
+    let data = data
         .get(4..)
         .ok_or_else(|| anyhow!("connectionless packet doesn't have any data"))?;
 
-    let mut reader = BitReader::endian(Cursor::new(packet_data), LittleEndian);
+    let mut reader = BitReader::endian(Cursor::new(data), LittleEndian);
 
     let command: u8 = reader.read_in::<8, _>()?;
 
     match command {
         // A2S_GETCHALLENGE
-        b'q' => handle_a2s_get_challenge(packet, &mut reader)?,
+        b'q' => handle_a2s_get_challenge(socket, from, &mut reader)?,
         // C2S_CONNECT
-        b'k' => return Ok(Some(handle_c2s_connect(packet, &mut reader)?)),
+        b'k' => return Ok(Some(handle_c2s_connect(socket, from, &mut reader)?)),
         _ => {
             return Err(anyhow!(
                 "unhandled connectionless packet type: {} ({:?})",

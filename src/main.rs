@@ -21,19 +21,6 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-struct PacketInfo<'a> {
-    data: &'a [u8],
-    from: SocketAddr,
-    socket: &'a UdpSocket,
-}
-
-impl PacketInfo<'_> {
-    /// Send data to the address that this packet originated from
-    pub fn send(&self, data: &[u8]) -> std::io::Result<usize> {
-        self.socket.send_to(data, self.from)
-    }
-}
-
 fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let compression_type = packet_data
         .get(4..8)
@@ -83,14 +70,7 @@ fn process_packet(
         .ok_or_else(|| anyhow!("couldn't get header flags"))?;
 
     if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-        // TODO: Maybe this struct shouldn't exist
-        let packet_info = PacketInfo {
-            data: &packet_data,
-            from,
-            socket,
-        };
-
-        if let Some(netchan) = connectionless::process_connectionless_packet(&packet_info)? {
+        if let Some(netchan) = connectionless::process_connectionless_packet(socket, from, &packet_data)? {
             debug!("created netchannel for client {:?}", from);
             connections.insert(from, netchan);
         };
@@ -113,7 +93,6 @@ fn process_packet(
             netchan.queue_unreliable_message(Message::StringCmd(message::MessageStringCmd {
                 command: "redirect 127.0.0.1:27015\n".to_string(),
             }));
-
 
             netchan.send_packet(socket, from)?;
         }

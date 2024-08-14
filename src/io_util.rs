@@ -1,5 +1,4 @@
 use bitstream_io::{BitRead, BitWrite};
-use tracing::trace;
 
 pub fn write_string<W: BitWrite>(reader: &mut W, string: &str) -> std::io::Result<()> {
     reader.write_bytes(string.as_bytes())?;
