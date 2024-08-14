@@ -126,15 +126,7 @@ impl NetChannel {
             }
         }
 
-        if ((u64::try_from(packet.len())? * 8) - reader.position_in_bits()?) > 0 {
-            trace!(
-                "process remaining messages: {} > {}",
-                packet.len() * 8,
-                reader.position_in_bits()?
-            );
-
-            self.process_messages(&mut reader, packet.len(), message_handler)?;
-        }
+        self.process_messages(&mut reader, packet.len(), message_handler)?;
 
         Ok(())
     }
