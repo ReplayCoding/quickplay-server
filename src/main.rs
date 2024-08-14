@@ -64,8 +64,6 @@ fn process_packet(
     from: SocketAddr,
     packet_data: &[u8],
 ) -> anyhow::Result<()> {
-    let packet_data = decode_raw_packet(packet_data)?;
-
     let header_flags = packet_data
         .get(0..4)
         .ok_or_else(|| anyhow!("couldn't get header flags"))?;
@@ -78,6 +76,10 @@ fn process_packet(
             connections.insert(from, netchan);
         };
     } else if let Some(netchan) = connections.get_mut(&from) {
+        // It's pretty expensive to do this, so only decode when we have a
+        // connection
+        let packet_data = decode_raw_packet(packet_data)?;
+
         let mut should_send_print = false;
         netchan.process_packet(&packet_data, &mut |message| {
             debug!("got message {:?}", message);
