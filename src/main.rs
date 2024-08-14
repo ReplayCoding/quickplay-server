@@ -7,6 +7,7 @@ mod netchannel;
 use std::{
     borrow::Cow,
     collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
     net::{SocketAddr, UdpSocket},
 };
 
@@ -70,7 +71,9 @@ fn process_packet(
         .ok_or_else(|| anyhow!("couldn't get header flags"))?;
 
     if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-        if let Some(netchan) = connectionless::process_connectionless_packet(socket, from, &packet_data)? {
+        if let Some(netchan) =
+            connectionless::process_connectionless_packet(socket, from, &packet_data)?
+        {
             debug!("created netchannel for client {:?}", from);
             connections.insert(from, netchan);
         };
@@ -115,24 +118,24 @@ fn main() -> anyhow::Result<()> {
 
     let mut packet_data = vec![0u8; u16::MAX.into()];
     loop {
-        let (packet_size, addr) = socket.recv_from(&mut packet_data)?;
+        let (packet_size, from) = socket.recv_from(&mut packet_data)?;
         let packet_data = &packet_data[..packet_size];
+
+        let mut address_hasher = DefaultHasher::new();
+        from.hash(&mut address_hasher);
 
         let _span = span!(
             tracing::Level::ERROR,
-            "process packet",
-            "{}",
-            addr.to_string()
+            "handle packet",
+            "{:016x}",
+            address_hasher.finish(),
         );
 
         _span.in_scope(|| {
-            trace!("got packet of size {} from {:?}", packet_size, addr);
+            trace!("got packet of size {}", packet_size);
 
-            if let Err(err) = process_packet(&mut connections, &socket, addr, packet_data) {
-                warn!(
-                    "error occured while handling packet from {:?}: {:?}",
-                    addr, err
-                );
+            if let Err(err) = process_packet(&mut connections, &socket, from, packet_data) {
+                warn!("error occured while handling packet: {:?}", err);
             };
         });
     }
