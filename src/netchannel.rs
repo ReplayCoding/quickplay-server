@@ -412,6 +412,8 @@ impl NetChannel {
         buffer[checksum_offs + 1] = checksum[1];
 
         socket.send_to(&buffer, addr)?;
+        
+        self.out_sequence_nr += 1;
 
         Ok(())
     }
