@@ -1,4 +1,3 @@
-// TODO: this file needs to be cleaned up
 mod connectionless;
 mod io_util;
 mod message;
@@ -6,15 +5,17 @@ mod netchannel;
 
 use std::{
     borrow::Cow,
+    cell::RefCell,
     collections::HashMap,
     hash::{DefaultHasher, Hash, Hasher},
     net::{SocketAddr, UdpSocket},
+    rc::Rc,
 };
 
 use anyhow::anyhow;
-use message::Message;
+use message::{Message, MessagePrint};
 use netchannel::NetChannel;
-use tracing::{debug, info, span, trace, warn};
+use tracing::{debug, info, span, warn};
 
 const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
 const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
@@ -22,7 +23,54 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-struct Connection {}
+struct Connection {
+    socket: Rc<UdpSocket>,
+    client_addr: SocketAddr,
+    netchan: RefCell<NetChannel>,
+
+    state: RefCell<ConnectionState>,
+}
+
+impl Connection {
+    fn new(socket: Rc<UdpSocket>, client_addr: SocketAddr, netchan: NetChannel) -> Self {
+        Self {
+            socket,
+            client_addr,
+            netchan: netchan.into(),
+
+            state: ConnectionState::Init.into(),
+        }
+    }
+
+    fn handle_packet(&self, data: &[u8]) -> anyhow::Result<()> {
+        self.netchan
+            .borrow_mut()
+            .process_packet(data, &mut |message| {
+                self.state.borrow_mut().handle_message(message)
+            })?;
+
+        tracing::trace!("aaaaa");
+        self.netchan.borrow_mut().send_packet(
+            &self.socket,
+            self.client_addr,
+            &[Message::Print(MessagePrint {
+                text: format!("hi {:?}\n", std::time::Instant::now()),
+            })],
+        )?;
+
+        Ok(())
+    }
+}
+
+enum ConnectionState {
+    Init,
+}
+
+impl ConnectionState {
+    fn handle_message(&mut self, message: &Message) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
 
 fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {
     let compression_type = packet_data
@@ -61,8 +109,8 @@ fn decode_raw_packet(packet_data: &[u8]) -> anyhow::Result<Cow<'_, [u8]>> {
 }
 
 fn process_packet(
-    connections: &mut HashMap<SocketAddr, NetChannel>,
-    socket: &UdpSocket,
+    connections: &mut HashMap<SocketAddr, Connection>,
+    socket: Rc<UdpSocket>,
     from: SocketAddr,
     packet_data: &[u8],
 ) -> anyhow::Result<()> {
@@ -72,38 +120,18 @@ fn process_packet(
 
     if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
         if let Some(challenge) =
-            connectionless::process_connectionless_packet(socket, from, &packet_data)?
+            connectionless::process_connectionless_packet(&socket, from, &packet_data)?
         {
-            let netchan = NetChannel::new(challenge);
+            let connection = Connection::new(socket, from, NetChannel::new(challenge));
             debug!("created netchannel for client {:?}", from);
-            connections.insert(from, netchan);
+            connections.insert(from, connection);
         };
-    } else if let Some(netchan) = connections.get_mut(&from) {
+    } else if let Some(connection) = connections.get_mut(&from) {
         // It's pretty expensive to do this, so only decode when we have a
         // connection
         let packet_data = decode_raw_packet(packet_data)?;
 
-        let mut should_send_print = false;
-        netchan.process_packet(&packet_data, &mut |message| {
-            debug!("got message {:?}", message);
-            if let Message::SignonState(_) = message {
-                should_send_print = true;
-            }
-            Ok(())
-        })?;
-
-        if should_send_print {
-            debug!("Sending print");
-            netchan.queue_unreliable_message(Message::Print(message::MessagePrint {
-                text: "TEST TEST TEST 🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸🐸\n".to_string(),
-            }));
-
-            netchan.queue_unreliable_message(Message::StringCmd(message::MessageStringCmd {
-                command: "redirect 127.0.0.1:27015\n".to_string(),
-            }));
-
-            netchan.send_packet(socket, from)?;
-        }
+        connection.handle_packet(&packet_data)?;
     } else {
         return Err(anyhow!(
             "got netchannel message, but no connection with client"
@@ -116,7 +144,7 @@ fn process_packet(
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
-    let socket = UdpSocket::bind("127.0.0.2:4444")?;
+    let socket = Rc::new(UdpSocket::bind("127.0.0.2:4444")?);
     info!("bound to address {:?}", socket.local_addr()?);
 
     let mut connections = HashMap::new();
@@ -137,9 +165,7 @@ fn main() -> anyhow::Result<()> {
         );
 
         _span.in_scope(|| {
-            trace!("got packet of size {}", packet_size);
-
-            if let Err(err) = process_packet(&mut connections, &socket, from, packet_data) {
+            if let Err(err) = process_packet(&mut connections, socket.clone(), from, packet_data) {
                 warn!("error occured while handling packet: {:?}", err);
             };
         });

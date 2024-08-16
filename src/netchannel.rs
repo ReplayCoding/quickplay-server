@@ -75,8 +75,6 @@ pub struct NetChannel {
     challenge: u32,
 
     received_data: [Option<ReceivedData>; MAX_STREAMS],
-
-    queued_unreliable_messages: Vec<Message>,
 }
 
 impl NetChannel {
@@ -93,7 +91,6 @@ impl NetChannel {
             challenge,
 
             received_data: std::array::from_fn(|_| None),
-            queued_unreliable_messages: vec![],
         }
     }
 
@@ -370,29 +367,36 @@ impl NetChannel {
 
     // TODO: this should take some sort of socket wrapper that handles packet
     // splitting and compression
-    pub fn send_packet(&mut self, socket: &UdpSocket, addr: SocketAddr) -> anyhow::Result<()> {
+    pub fn send_packet(
+        &mut self,
+        socket: &UdpSocket,
+        addr: SocketAddr,
+        messages: &[Message],
+    ) -> anyhow::Result<()> {
         let mut buffer: Vec<u8> = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
+
+        let mut flags = PacketFlags::empty();
 
         writer.write_out::<32, _>(self.out_sequence_nr)?;
         writer.write_out::<32, _>(self.in_sequence_nr)?;
 
-        writer.write_out::<8, _>(PacketFlags::PACKET_FLAG_CHALLENGE.bits())?;
+        let flags_offset: usize = (32 + 32) / 8;
+        writer.write_out::<8, _>(0)?; // write out dummy flags
 
         // NOTE: this is really Stupid, i shouldn't have to manually calculate this.
         let checksum_offs: usize = (32 + 32 + 8) / 8;
-        writer.write_out::<16, _>(0)?; // write out dummy checksum, will overwrite later
+        writer.write_out::<16, _>(0)?; // write out dummy checksum
 
         writer.write_out::<8, _>(self.in_reliable_state)?;
 
         // always write out challenge
+        flags |= PacketFlags::PACKET_FLAG_CHALLENGE;
         writer.write_out::<32, _>(self.challenge)?;
 
-        // write all the messages we have queued
-        for message in &self.queued_unreliable_messages {
+        for message in messages {
             message.write(&mut writer)?;
         }
-        self.queued_unreliable_messages = vec![];
 
         // pad out data so everything is written. this *should* be fine to use,
         // since it should translate to a net_NOP at worst. i think. hopefully.
@@ -403,6 +407,9 @@ impl NetChannel {
             buffer.resize(MIN_PACKET_SIZE, 0);
         }
 
+        // write flags into buffer now
+        buffer[flags_offset] = flags.bits();
+
         // should never panic because we've already written the dummy checksum.
         // at worst we get an empty slice
         let bytes_to_checksum = &buffer[checksum_offs + 2..];
@@ -412,14 +419,10 @@ impl NetChannel {
         buffer[checksum_offs + 1] = checksum[1];
 
         socket.send_to(&buffer, addr)?;
-        
+
         self.out_sequence_nr += 1;
 
         Ok(())
-    }
-
-    pub fn queue_unreliable_message(&mut self, message: Message) {
-        self.queued_unreliable_messages.push(message);
     }
 }
 
