@@ -6,7 +6,7 @@ mod netchannel;
 use std::{
     borrow::Cow,
     net::{SocketAddr, UdpSocket},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -22,15 +22,15 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-const WATCHDOG_UPDATE_DELAY: Duration = Duration::from_secs(1);
+const WATCHDOG_UPDATE_DELAY: Duration = Duration::from_millis(500);
 const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct Connection {
     socket: Arc<UdpSocket>,
     client_addr: SocketAddr,
-    netchan: Mutex<NetChannel>,
+    netchan: NetChannel,
 
-    state: Mutex<ConnectionState>,
+    state: ConnectionState,
 
     created_at: Instant,
     marked_for_death: bool,
@@ -50,14 +50,16 @@ impl Connection {
     }
 
     fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let mut netchan = self.netchan.lock().expect("couldn't acquire netchan mutex");
-        let mut state = self.state.lock().expect("couldn't acquire state mutex");
+        let messages = self.netchan.process_packet(data)?;
 
-        netchan.process_packet(data, &mut |message| state.handle_message(message))?;
+        for message in &messages {
+            trace!("got message {:?}", message);
+            match message {
+                Message::Disconnect(_) => self.state = ConnectionState::Disconnected,
 
-        // make sure we unlock stuff so that tick can take the locks
-        drop(netchan);
-        drop(state);
+                _ => debug!("received unhandled message: {:?}", message),
+            }
+        }
 
         self.tick(false)?;
 
@@ -65,16 +67,13 @@ impl Connection {
     }
 
     fn tick(&mut self, send_empty: bool) -> anyhow::Result<()> {
-        let mut netchan = self.netchan.lock().expect("couldn't acquire netchan mutex");
-        let state = *self.state.lock().expect("couldn't acquire state mutex");
-
-        if state == ConnectionState::Disconnected {
+        if self.state == ConnectionState::Disconnected {
             self.marked_for_death = true;
         }
 
         if send_empty {
             // dumb testing hack get rid of me
-            netchan.send_packet(
+            self.netchan.send_packet(
                 &self.socket,
                 self.client_addr,
                 &[Message::Print(message::MessagePrint {
@@ -83,7 +82,8 @@ impl Connection {
             )?;
 
             // allow the netchannel to send remaining reliable data
-            netchan.send_packet(&self.socket, self.client_addr, &[])?;
+            self.netchan
+                .send_packet(&self.socket, self.client_addr, &[])?;
         }
 
         Ok(())
@@ -94,18 +94,6 @@ impl Connection {
 enum ConnectionState {
     Init,
     Disconnected,
-}
-
-impl ConnectionState {
-    fn handle_message(&mut self, message: &Message) -> anyhow::Result<()> {
-        trace!("got message {:?}", message);
-
-        if let Message::Disconnect(_) = message {
-            *self = Self::Disconnected;
-        }
-
-        Ok(())
-    }
 }
 
 fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {

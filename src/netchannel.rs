@@ -94,13 +94,11 @@ impl NetChannel {
         }
     }
 
-    pub fn process_packet<F: FnMut(&Message) -> anyhow::Result<()>>(
-        &mut self,
-        packet: &[u8],
-        message_handler: &mut F,
-    ) -> anyhow::Result<()> {
+    pub fn process_packet(&mut self, packet: &[u8]) -> anyhow::Result<Vec<Message>> {
         let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
         let flags = self.parse_header(&mut reader, packet)?;
+
+        let mut messages = vec![];
 
         if flags.contains(PacketFlags::PACKET_FLAG_RELIABLE) {
             let subchannel_bit: u8 = reader.read_in::<3, _>()?;
@@ -119,13 +117,13 @@ impl NetChannel {
             );
 
             for i in 0..MAX_STREAMS {
-                self.process_subchannel_data(i, message_handler)?;
+                self.process_subchannel_data(i, &mut messages)?;
             }
         }
 
-        self.process_messages(&mut reader, packet.len(), message_handler)?;
+        self.process_messages(&mut reader, packet.len(), &mut messages)?;
 
-        Ok(())
+        Ok(messages)
     }
 
     fn parse_header<R, E>(
@@ -299,14 +297,11 @@ impl NetChannel {
         Ok(())
     }
 
-    fn process_subchannel_data<F>(
+    fn process_subchannel_data(
         &mut self,
         channel: usize,
-        message_handler: &mut F,
-    ) -> anyhow::Result<()>
-    where
-        F: FnMut(&Message) -> anyhow::Result<()>,
-    {
+        messages: &mut Vec<Message>,
+    ) -> anyhow::Result<()> {
         let received_data = &self.received_data[channel];
         if let Some(received_data) = received_data {
             if received_data.acked_fragments < received_data.fragments() {
@@ -326,7 +321,7 @@ impl NetChannel {
 
             if received_data.filename.is_none() {
                 let mut reader = BitReader::endian(Cursor::new(&received_data.data), LittleEndian);
-                self.process_messages(&mut reader, received_data.data.len(), message_handler)?;
+                self.process_messages(&mut reader, received_data.data.len(), messages)?;
             } else {
                 return Err(anyhow!("file upload"));
             }
@@ -338,16 +333,15 @@ impl NetChannel {
         Ok(())
     }
 
-    fn process_messages<R, E, F>(
+    fn process_messages<R, E>(
         &self,
         reader: &mut BitReader<R, E>,
         data_len: usize,
-        message_handler: &mut F,
+        messages: &mut Vec<Message>,
     ) -> anyhow::Result<()>
     where
         R: std::io::Read + std::io::Seek,
         E: bitstream_io::Endianness,
-        F: FnMut(&Message) -> anyhow::Result<()>,
     {
         loop {
             if (u64::try_from(data_len)? * 8) - reader.position_in_bits()? < NETMSG_TYPE_BITS.into()
@@ -359,7 +353,7 @@ impl NetChannel {
             let message_type: u32 = reader.read_in::<NETMSG_TYPE_BITS, _>()?;
             let message = Message::read(reader, message_type)?;
 
-            message_handler(&message)?
+            messages.push(message);
         }
 
         Ok(())
