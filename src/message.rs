@@ -67,6 +67,10 @@ impl Message {
                 writer.write_out::<NETMSG_TYPE_BITS, _>(MESSAGE_TYPE_PRINT)?;
                 write_string(writer, &message.text)?;
             }
+            Message::Disconnect(message) => {
+                writer.write_out::<NETMSG_TYPE_BITS, _>(MESSAGE_TYPE_DISCONNECT)?;
+                write_string(writer, &message.reason)?;
+            }
 
             _ => return Err(anyhow!("unhandled message {:?} for write", self)),
         };
