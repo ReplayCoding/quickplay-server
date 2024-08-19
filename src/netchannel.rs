@@ -19,6 +19,8 @@ const MAX_STREAMS: usize = 2; // 0 == regular, 1 == file stream
 const FRAGMENT_BITS: u32 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
 
+const MAX_FILE_SIZE_BITS: u32 = 26;
+
 // Also used by Message::write
 pub const NETMSG_TYPE_BITS: u32 = 6;
 
@@ -209,34 +211,51 @@ impl NetChannel {
     fn read_subchannel_data<R, E>(
         &mut self,
         reader: &mut BitReader<R, E>,
-        channel: usize,
+        stream: usize,
     ) -> anyhow::Result<()>
     where
         R: std::io::Read + std::io::Seek,
         E: bitstream_io::Endianness,
     {
         let is_multi_block = reader.read_bit()?;
-        trace!("is_multi_block {is_multi_block} [i {channel}]");
+        trace!("is_multi_block {is_multi_block} [i {stream}]");
 
-        let start_fragment = 0;
+        let mut start_fragment = 0;
         let mut num_fragments = 0;
-        let offset = 0;
+        let mut offset = 0;
         let mut length = 0;
 
         if is_multi_block {
-            return Err(anyhow!("multi block"));
+            start_fragment = reader.read_in::<{ MAX_FILE_SIZE_BITS - FRAGMENT_BITS }, _>()?;
+            num_fragments = reader.read_in::<3, _>()?;
+
+            offset = start_fragment * FRAGMENT_SIZE;
+            length = num_fragments * FRAGMENT_SIZE;
         }
+
+        trace!("start_fragment {start_fragment} num_fragments {num_fragments} offset {offset} length {length}");
 
         // Start of subchannel data, let's read the header
         if offset == 0 {
             let bytes: u32;
 
             if is_multi_block {
-                return Err(anyhow!("multi block"));
+                // is file?
+                if reader.read_bit()? {
+                    return Err(anyhow!("file transfer"));
+                }
+
+                // NOTE: The client will only compress streams if the server
+                // sends a ServerInfo packet with m_nMaxClients > 0.
+                // is compressed?
+                if reader.read_bit()? {
+                    return Err(anyhow!("compressed data"));
+                }
+
+                bytes = reader.read_in::<MAX_FILE_SIZE_BITS, _>()?;
             } else {
-                let is_compressed = reader.read_bit()?;
-                trace!("\t is_compressed {is_compressed}");
-                if is_compressed {
+                // is compressed?
+                if reader.read_bit()? {
                     return Err(anyhow!("compressed data"));
                 }
 
@@ -251,10 +270,10 @@ impl NetChannel {
 
             // TODO: check that the size isn't too large
 
-            self.received_data[channel] = Some(received_data);
+            self.received_data[stream] = Some(received_data);
         };
 
-        let received_data = self.received_data[channel]
+        let received_data = self.received_data[stream]
             .as_mut()
             .ok_or_else(|| anyhow!("no active subchannel data"))?;
 
