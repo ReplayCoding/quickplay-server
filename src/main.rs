@@ -73,18 +73,20 @@ impl Connection {
 
         if send_empty {
             // dumb testing hack get rid of me
-            self.netchan.send_packet(
-                &self.socket,
-                self.client_addr,
-                &[Message::Print(message::MessagePrint {
-                    text: "lol\n".to_string(),
-                })],
-            )?;
+            self.send_packet(&[Message::Print(message::MessagePrint {
+                text: "lol\n".to_string(),
+            })])?;
 
             // allow the netchannel to send remaining reliable data
-            self.netchan
-                .send_packet(&self.socket, self.client_addr, &[])?;
+            self.send_packet(&[])?;
         }
+
+        Ok(())
+    }
+
+    fn send_packet(&mut self, messages: &[Message]) -> anyhow::Result<()> {
+        let data = self.netchan.create_send_packet(messages)?;
+        self.socket.send_to(&data, self.client_addr)?;
 
         Ok(())
     }

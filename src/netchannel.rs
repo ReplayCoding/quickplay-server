@@ -1,7 +1,4 @@
-use std::{
-    io::Cursor,
-    net::{SocketAddr, UdpSocket},
-};
+use std::io::Cursor;
 
 use anyhow::anyhow;
 use bitflags::bitflags;
@@ -111,7 +108,6 @@ impl NetChannel {
                 }
             }
 
-            // TODO: why isn't this set *after* we've successfully parsed the receieved data?
             self.in_reliable_state ^= 1 << subchannel_bit;
             trace!(
                 "subchannel_bit {subchannel_bit} reliable_state {}",
@@ -380,12 +376,7 @@ impl NetChannel {
 
     // TODO: this should take some sort of socket wrapper that handles packet
     // splitting and compression
-    pub fn send_packet(
-        &mut self,
-        socket: &UdpSocket,
-        addr: SocketAddr,
-        messages: &[Message],
-    ) -> anyhow::Result<()> {
+    pub fn create_send_packet(&mut self, messages: &[Message]) -> anyhow::Result<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
 
@@ -431,11 +422,9 @@ impl NetChannel {
         buffer[checksum_offs] = checksum[0];
         buffer[checksum_offs + 1] = checksum[1];
 
-        socket.send_to(&buffer, addr)?;
-
         self.out_sequence_nr += 1;
 
-        Ok(())
+        Ok(buffer)
     }
 }
 
@@ -444,4 +433,19 @@ fn calculate_checksum(bytes: &[u8]) -> u16 {
     let calculated_digest = crc_hasher.checksum(bytes);
     let calculated_checksum = (((calculated_digest >> 16) ^ calculated_digest) & 0xffff) as u16;
     calculated_checksum
+}
+
+#[test]
+fn test_netchannels() {
+    let mut server_channel = NetChannel::new(0);
+    let mut client_channel = NetChannel::new(0);
+
+    let messages = [Message::Print(crate::message::MessagePrint {
+        text: "0".to_string(),
+    })];
+
+    let packet = client_channel.create_send_packet(&messages).unwrap();
+    let recieved_messages = server_channel.process_packet(&packet).unwrap();
+
+    assert_eq!(recieved_messages, messages);
 }

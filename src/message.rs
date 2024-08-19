@@ -12,7 +12,7 @@ const MESSAGE_TYPE_SET_CON_VAR: u32 = 5; // sends one/multiple convar settings
 const MESSAGE_TYPE_SIGNON_STATE: u32 = 6; // signals current signon state
 const MESSAGE_TYPE_PRINT: u32 = 7; // print text to console
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Message {
     Disconnect(MessageDisconnect),
     StringCmd(MessageStringCmd),
@@ -79,28 +79,28 @@ impl Message {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessageDisconnect {
     pub reason: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessageStringCmd {
     pub command: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessageSetConVars {
     pub convars: Vec<(String, String)>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessageSignonState {
     pub signon_state: u8,
     pub spawn_count: i32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct MessagePrint {
     pub text: String,
 }
