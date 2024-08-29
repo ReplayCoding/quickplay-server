@@ -37,9 +37,14 @@ bitflags! {
 
 #[derive(Clone, Debug)]
 struct ReceivedData {
+    /// The number of acknowledged fragments. When `acked_fragments` ==
+    /// `self.fragments()`, the transfer is complete
     acked_fragments: u32,
+    /// The total number of bytes that will be sent to us
     bytes: u32,
     data: Vec<u8>,
+
+    /// Used for file transfers. If this is None then the data contains messages, not a file.
     filename: Option<String>,
 }
 
@@ -63,16 +68,21 @@ impl ReceivedData {
 }
 
 pub struct NetChannel {
+    /// Current outgoing sequence number
     out_sequence_nr: u32,
+    /// Last outgoing sequence number that has been acknowledged by the remote
     out_sequence_nr_ack: u32,
 
+    /// Highest seen incoming sequence number
     in_sequence_nr: u32,
-
-    in_reliable_state: u8,
 
     has_seen_challenge: bool,
     challenge: u32,
 
+    /// Reliable state for incoming streams
+    in_reliable_state: u8,
+
+    /// Incoming stream data
     received_data: [Option<ReceivedData>; MAX_STREAMS],
 }
 
@@ -110,7 +120,7 @@ impl NetChannel {
 
             self.in_reliable_state ^= 1 << subchannel_bit;
             trace!(
-                "subchannel_bit {subchannel_bit} reliable_state {}",
+                "flipped subchannel {subchannel_bit} (in_reliable_state {:08b})",
                 self.in_reliable_state
             );
 
@@ -214,7 +224,7 @@ impl NetChannel {
         E: bitstream_io::Endianness,
     {
         let is_multi_block = reader.read_bit()?;
-        trace!("is_multi_block {is_multi_block} [i {stream}]");
+        // trace!("is_multi_block {is_multi_block} [i {stream}]");
 
         let mut start_fragment = 0;
         let mut num_fragments = 0;
@@ -229,7 +239,7 @@ impl NetChannel {
             length = num_fragments * FRAGMENT_SIZE;
         }
 
-        trace!("start_fragment {start_fragment} num_fragments {num_fragments} offset {offset} length {length}");
+        // trace!("start_fragment {start_fragment} num_fragments {num_fragments} offset {offset} length {length}");
 
         // Start of subchannel data, let's read the header
         if offset == 0 {
@@ -276,7 +286,7 @@ impl NetChannel {
         if (start_fragment + num_fragments) == received_data.fragments() {
             // we are receiving the last fragment, adjust length
             let rest = FRAGMENT_SIZE - (received_data.bytes % FRAGMENT_SIZE);
-            trace!("rest {rest}");
+            // trace!("rest {rest}");
 
             if rest < FRAGMENT_SIZE {
                 length -= rest;
@@ -292,12 +302,12 @@ impl NetChannel {
             ));
         }
 
-        trace!(
-            "length {} num_fragments {} bytes {}",
-            length,
-            num_fragments,
-            received_data.bytes
-        );
+        // trace!(
+        //     "length {} num_fragments {} bytes {}",
+        //     length,
+        //     num_fragments,
+        //     received_data.bytes
+        // );
 
         let offset = usize::try_from(offset)?;
         let length = usize::try_from(length)?;
@@ -314,10 +324,10 @@ impl NetChannel {
 
     fn process_subchannel_data(
         &mut self,
-        channel: usize,
+        stream: usize,
         messages: &mut Vec<Message>,
     ) -> anyhow::Result<()> {
-        let received_data = &self.received_data[channel];
+        let received_data = &self.received_data[stream];
         if let Some(received_data) = received_data {
             if received_data.acked_fragments < received_data.fragments() {
                 // Haven't got all the data yet
@@ -342,7 +352,7 @@ impl NetChannel {
             }
 
             // Done receiving data, reset subchannel
-            self.received_data[channel] = None;
+            self.received_data[stream] = None;
         }
 
         Ok(())
