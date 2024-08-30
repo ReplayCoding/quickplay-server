@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::anyhow;
 use dashmap::DashMap;
-use message::Message;
+use message::{Message, MessageDisconnect};
 use netchannel::NetChannel;
 use tracing::{debug, info, trace, warn};
 
@@ -22,8 +22,8 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-const WATCHDOG_UPDATE_DELAY: Duration = Duration::from_millis(500);
-const WATCHDOG_TIMEOUT: Duration = Duration::from_secs(10);
+const CONNECTION_UPDATE_DELAY: Duration = Duration::from_millis(500);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Connection {
     socket: Arc<UdpSocket>,
@@ -55,6 +55,21 @@ impl Connection {
         for message in &messages {
             trace!("got message {:?}", message);
             match message {
+                Message::SignonState(_) => {
+                    let mut messages = vec![];
+                    for i in 0..5000 {
+                        messages.push(Message::Print(message::MessagePrint {
+                            text: format!("🐸✨ {}\n", i),
+                        }));
+                    }
+
+                    self.netchan.queue_reliable_messages(&messages)?;
+                    self.netchan.queue_reliable_messages(&[Message::Disconnect(
+                        MessageDisconnect {
+                            reason: "Yay".to_string(),
+                        },
+                    )])?;
+                }
                 Message::Disconnect(_) => self.state = ConnectionState::Disconnected,
 
                 _ => debug!("received unhandled message: {:?}", message),
@@ -72,11 +87,6 @@ impl Connection {
         }
 
         if send_empty {
-            // dumb testing hack get rid of me
-            self.send_packet(&[Message::Print(message::MessagePrint {
-                text: "lol\n".to_string(),
-            })])?;
-
             // allow the netchannel to send remaining reliable data
             self.send_packet(&[])?;
         }
@@ -165,7 +175,8 @@ impl Server {
                     warn!("error occured while updating connection: {:?}", err);
                 };
 
-                if current_time.duration_since(connection.created_at) > WATCHDOG_TIMEOUT {
+                if false && current_time.duration_since(connection.created_at) > CONNECTION_TIMEOUT
+                {
                     // TODO: maybe we should send a disconnect message before we
                     // kill the connection, so that the client gets some
                     // feedback
@@ -186,7 +197,7 @@ impl Server {
                 connections.remove(&client_addr);
             }
 
-            std::thread::sleep(WATCHDOG_UPDATE_DELAY);
+            std::thread::sleep(CONNECTION_UPDATE_DELAY);
         }
     }
 

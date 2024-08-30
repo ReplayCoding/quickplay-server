@@ -1,20 +1,46 @@
-use std::io::Cursor;
+//! An implementation of Source Engine NetChannels
+//!
+//! NetChannels are the primary way that Source communicates over the network.
+//! They are a layer on top of UDP that can send and receive unreliable messages
+//! along with reliable messages and file streams.
+//!
+//! # Reliable Streams
+//! Two reliable transfers can occur at one time, a stream
+//! for messages and a stream for file transfers. Packets that contain reliable
+//! data will have the PACKET_FLAG_RELIABLE flag set.
 
-use anyhow::anyhow;
+//! If a packet contains reliable data, it will then specify which of the 8
+//! possible subchannels it is sending data on. After the client is finished
+//! reading the incoming stream data, it will flip a bit in it's incoming
+//! reliable state. The incoming reliable state is sent back to the server. If
+//! the client's incoming reliable state doesn't match up with the server's
+//! outgoing reliable state, then the server will consider that data to have
+//! been dropped and will resend the subchannel data. The client will not
+//! receive new data on a subchannel until the previous data has been acked for
+//! that subchannel.
+use std::{collections::VecDeque, io::Cursor};
+
+use anyhow::{anyhow, Ok};
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
-use tracing::trace;
+use tracing::{instrument, trace};
 
-use crate::{io_util::read_varint32, message::Message};
+use crate::{
+    io_util::{read_varint32, write_varint32},
+    message::Message,
+};
 
 // TODO: what is the optimal value for us? We probably aren't
 // ever going to send 5000 packets
 const MAX_PACKETS_DROPPED: u32 = 5000;
 
 const MAX_STREAMS: usize = 2; // 0 == regular, 1 == file stream
+const MAX_SUBCHANNELS: usize = 8;
 
 const FRAGMENT_BITS: u32 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
+
+const MAX_RELIABLE_PAYLOAD_SIZE: u32 = 1024 /* 288000 */;
 
 const MAX_FILE_SIZE_BITS: u32 = 26;
 
@@ -36,7 +62,7 @@ bitflags! {
 }
 
 #[derive(Clone, Debug)]
-struct ReceivedData {
+struct IncomingReliableData {
     /// The number of acknowledged fragments. When `acked_fragments` ==
     /// `self.fragments()`, the transfer is complete
     acked_fragments: u32,
@@ -48,11 +74,8 @@ struct ReceivedData {
     filename: Option<String>,
 }
 
-impl ReceivedData {
-    fn new(
-        filename: Option<String>,
-        bytes: u32,
-    ) -> Result<ReceivedData, std::num::TryFromIntError> {
+impl IncomingReliableData {
+    fn new(filename: Option<String>, bytes: u32) -> anyhow::Result<IncomingReliableData> {
         let data_len = usize::try_from(bytes)?;
         Ok(Self {
             acked_fragments: 0,
@@ -62,8 +85,70 @@ impl ReceivedData {
         })
     }
 
-    fn fragments(&self) -> u32 {
-        (self.bytes + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE
+    fn total_fragments(&self) -> u32 {
+        bytes_to_fragments(self.bytes)
+    }
+}
+
+struct OutgoingReliableData {
+    acked_fragments: u32,
+    pending_fragments: u32,
+    data: Vec<u8>,
+}
+impl OutgoingReliableData {
+    fn new(data: Vec<u8>) -> anyhow::Result<Self> {
+        if u32::try_from(data.len()).is_err() {
+            return Err(anyhow!("outgoing reliable data size does not fit into u32"));
+        };
+
+        Ok(Self {
+            acked_fragments: 0,
+            pending_fragments: 0,
+            data,
+        })
+    }
+
+    fn total_fragments(&self) -> u32 {
+        bytes_to_fragments(self.total_bytes())
+    }
+
+    fn total_bytes(&self) -> u32 {
+        // Data len is bounds checked on creation, so this is ok
+        self.data.len() as u32
+    }
+}
+
+fn bytes_to_fragments(bytes: u32) -> u32 {
+    (bytes + FRAGMENT_SIZE - 1) / FRAGMENT_SIZE
+}
+
+#[derive(PartialEq, Eq)]
+enum SubChannelState {
+    /// The subchannel is not currently transferring any data.
+    Free,
+    /// The subchannel has been filled with data for a transfer, but that data
+    /// has not been sent.
+    WaitingToSend,
+    /// The subchannel has sent data to the client, but it has not received an
+    /// acknowledgement that the data has been received.
+    WaitingForAck,
+}
+struct SubChannel {
+    state: SubChannelState,
+
+    start_fragment: [u32; MAX_STREAMS],
+    num_fragments: [u32; MAX_STREAMS],
+
+    send_seq_nr: i64,
+}
+impl SubChannel {
+    fn new_free() -> SubChannel {
+        Self {
+            state: SubChannelState::Free,
+            start_fragment: [0; MAX_STREAMS],
+            num_fragments: [0; MAX_STREAMS],
+            send_seq_nr: -1,
+        }
     }
 }
 
@@ -79,11 +164,12 @@ pub struct NetChannel {
     has_seen_challenge: bool,
     challenge: u32,
 
-    /// Reliable state for incoming streams
     in_reliable_state: u8,
+    incoming_reliable_data: [Option<IncomingReliableData>; MAX_STREAMS],
 
-    /// Incoming stream data
-    received_data: [Option<ReceivedData>; MAX_STREAMS],
+    out_reliable_state: u8,
+    outgoing_reliable_data: [VecDeque<OutgoingReliableData>; MAX_STREAMS],
+    outgoing_subchannels: [SubChannel; MAX_SUBCHANNELS],
 }
 
 impl NetChannel {
@@ -94,15 +180,19 @@ impl NetChannel {
 
             in_sequence_nr: 0,
 
-            in_reliable_state: 0,
-
             has_seen_challenge: false,
             challenge,
 
-            received_data: std::array::from_fn(|_| None),
+            in_reliable_state: 0,
+            incoming_reliable_data: std::array::from_fn(|_| None),
+
+            out_reliable_state: 0,
+            outgoing_reliable_data: std::array::from_fn(|_| VecDeque::new()),
+            outgoing_subchannels: std::array::from_fn(|_| SubChannel::new_free()),
         }
     }
 
+    #[instrument(skip_all)]
     pub fn process_packet(&mut self, packet: &[u8]) -> anyhow::Result<Vec<Message>> {
         let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
         let flags = self.parse_header(&mut reader, packet)?;
@@ -114,18 +204,18 @@ impl NetChannel {
 
             for i in 0..MAX_STREAMS {
                 if reader.read_bit()? {
-                    self.read_subchannel_data(&mut reader, i)?;
+                    self.read_incoming_subchannel_data(&mut reader, i)?;
                 }
             }
 
             self.in_reliable_state ^= 1 << subchannel_bit;
             trace!(
-                "flipped subchannel {subchannel_bit} (in_reliable_state {:08b})",
+                "flipped subchannel {subchannel_bit} (new in_reliable_state {:08b})",
                 self.in_reliable_state
             );
 
             for i in 0..MAX_STREAMS {
-                self.process_subchannel_data(i, &mut messages)?;
+                self.process_incoming_subchannel_data(i, &mut messages)?;
             }
         }
 
@@ -134,6 +224,7 @@ impl NetChannel {
         Ok(messages)
     }
 
+    #[instrument(skip_all)]
     fn parse_header<R, E>(
         &mut self,
         reader: &mut BitReader<R, E>,
@@ -168,7 +259,7 @@ impl NetChannel {
             }
         }
 
-        let _reliable_state: u8 = reader.read_in::<8, _>()?;
+        let reliable_state: u8 = reader.read_in::<8, _>()?;
         let mut n_choked: u32 = 0;
 
         if flags.contains(PacketFlags::PACKET_FLAG_CHOKED) {
@@ -206,15 +297,94 @@ impl NetChannel {
             return Err(anyhow!("number of packets dropped ({num_packets_dropped}) has exceeded maximum allowed ({MAX_PACKETS_DROPPED})"));
         }
 
-        // TODO: handle subchannel stuff
+        self.update_outgoing_subchannel_ack(sequence_ack, reliable_state)?;
 
         self.in_sequence_nr = sequence;
         self.out_sequence_nr_ack = sequence_ack;
 
+        self.check_outgoing_subchannel_completion()?;
+
         Ok(flags)
     }
 
-    fn read_subchannel_data<R, E>(
+    fn update_outgoing_subchannel_ack(
+        &mut self,
+        sequence_ack: u32,
+        acked_reliable_state: u8,
+    ) -> anyhow::Result<()> {
+        trace!("outgoing reliable ack {acked_reliable_state:08b}");
+        for subchannel_index in 0..MAX_SUBCHANNELS {
+            assert!(MAX_SUBCHANNELS <= 8);
+            let reliable_state_mask = 1 << subchannel_index as u8;
+            let subchannel = &mut self.outgoing_subchannels[subchannel_index];
+
+            if (self.out_reliable_state & reliable_state_mask)
+                == (acked_reliable_state & reliable_state_mask)
+            {
+                if subchannel.send_seq_nr > sequence_ack.into() {
+                    return Err(anyhow!(
+                        "invalid reliable state for subchannel {subchannel_index} ({} > {})",
+                        subchannel.send_seq_nr,
+                        sequence_ack
+                    ));
+                } else if subchannel.state == SubChannelState::WaitingForAck {
+                    for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate()
+                    {
+                        if subchannel.num_fragments[streams_idx] == 0 {
+                            continue;
+                        }
+
+                        let stream = streams
+                            .front_mut()
+                            .ok_or_else(|| anyhow!("subchannel waiting for ack, but no stream!"))?;
+
+                        stream.acked_fragments += subchannel.num_fragments[streams_idx];
+                        stream.pending_fragments -= subchannel.num_fragments[streams_idx];
+                        trace!(
+                            "updated stream {}: acked frags {}",
+                            streams_idx,
+                            stream.acked_fragments
+                        );
+                    }
+
+                    *subchannel = SubChannel::new_free();
+                }
+            } else {
+                if subchannel.send_seq_nr <= sequence_ack.into() {
+                    if subchannel.state == SubChannelState::Free {
+                        return Err(anyhow!("subchannel should not be free here!"));
+                    }
+
+                    if subchannel.state == SubChannelState::WaitingForAck {
+                        subchannel.state = SubChannelState::WaitingToSend;
+
+                        trace!("resending subchannel {}", subchannel_index);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_outgoing_subchannel_completion(&mut self) -> anyhow::Result<()> {
+        for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
+            let mut stream_completed = false;
+            if let Some(stream) = streams.front() {
+                if stream.acked_fragments == stream.total_fragments() {
+                    stream_completed = true;
+                }
+            }
+
+            if stream_completed {
+                trace!("completed sending stream {}", streams_idx);
+                streams.pop_front();
+            }
+        }
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    fn read_incoming_subchannel_data<R, E>(
         &mut self,
         reader: &mut BitReader<R, E>,
         stream: usize,
@@ -268,22 +438,22 @@ impl NetChannel {
                 bytes = read_varint32(reader)?;
             }
 
-            let received_data = ReceivedData::new(None, bytes)?;
+            let received_data = IncomingReliableData::new(None, bytes)?;
             if !is_multi_block {
-                num_fragments = received_data.fragments();
+                num_fragments = received_data.total_fragments();
                 length = num_fragments * FRAGMENT_SIZE;
             }
 
             // TODO: check that the size isn't too large
 
-            self.received_data[stream] = Some(received_data);
+            self.incoming_reliable_data[stream] = Some(received_data);
         };
 
-        let received_data = self.received_data[stream]
+        let received_data = self.incoming_reliable_data[stream]
             .as_mut()
             .ok_or_else(|| anyhow!("no active subchannel data"))?;
 
-        if (start_fragment + num_fragments) == received_data.fragments() {
+        if (start_fragment + num_fragments) == received_data.total_fragments() {
             // we are receiving the last fragment, adjust length
             let rest = FRAGMENT_SIZE - (received_data.bytes % FRAGMENT_SIZE);
             // trace!("rest {rest}");
@@ -293,12 +463,12 @@ impl NetChannel {
             }
         };
 
-        if (start_fragment + num_fragments) > received_data.fragments() {
+        if (start_fragment + num_fragments) > received_data.total_fragments() {
             return Err(anyhow!(
                 "Received out-of-bounds fragment: {} + {} > {}",
                 start_fragment,
                 num_fragments,
-                received_data.fragments()
+                received_data.total_fragments()
             ));
         }
 
@@ -322,23 +492,24 @@ impl NetChannel {
         Ok(())
     }
 
-    fn process_subchannel_data(
+    #[instrument(skip_all)]
+    fn process_incoming_subchannel_data(
         &mut self,
         stream: usize,
         messages: &mut Vec<Message>,
     ) -> anyhow::Result<()> {
-        let received_data = &self.received_data[stream];
+        let received_data = &self.incoming_reliable_data[stream];
         if let Some(received_data) = received_data {
-            if received_data.acked_fragments < received_data.fragments() {
+            if received_data.acked_fragments < received_data.total_fragments() {
                 // Haven't got all the data yet
                 return Ok(());
             }
 
-            if received_data.acked_fragments > received_data.fragments() {
+            if received_data.acked_fragments > received_data.total_fragments() {
                 return Err(anyhow!(
                     "Subchannel fragments overflow: {} > {}",
                     received_data.acked_fragments,
-                    received_data.fragments()
+                    received_data.total_fragments()
                 ));
             }
 
@@ -352,12 +523,13 @@ impl NetChannel {
             }
 
             // Done receiving data, reset subchannel
-            self.received_data[stream] = None;
+            self.incoming_reliable_data[stream] = None;
         }
 
         Ok(())
     }
 
+    #[instrument(skip_all)]
     fn process_messages<R, E>(
         &self,
         reader: &mut BitReader<R, E>,
@@ -386,6 +558,7 @@ impl NetChannel {
 
     // TODO: this should take some sort of socket wrapper that handles packet
     // splitting and compression
+    #[instrument(skip_all)]
     pub fn create_send_packet(&mut self, messages: &[Message]) -> anyhow::Result<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
@@ -407,6 +580,10 @@ impl NetChannel {
         // always write out challenge
         flags |= PacketFlags::PACKET_FLAG_CHALLENGE;
         writer.write_out::<32, _>(self.challenge)?;
+
+        if self.send_outgoing_subchannel_data(&mut writer)? {
+            flags |= PacketFlags::PACKET_FLAG_RELIABLE;
+        }
 
         for message in messages {
             message.write(&mut writer)?;
@@ -434,7 +611,183 @@ impl NetChannel {
 
         self.out_sequence_nr += 1;
 
+        trace!(
+            "sending packet [out seq nr {}] [in seq nr {}] [in reliable state {:08b}] [flags {:?}]",
+            self.out_sequence_nr,
+            self.in_sequence_nr,
+            self.in_reliable_state,
+            flags
+        );
+
         Ok(buffer)
+    }
+
+    #[instrument(skip_all)]
+    fn send_outgoing_subchannel_data<W: BitWrite>(
+        &mut self,
+        writer: &mut W,
+    ) -> anyhow::Result<bool> {
+        self.update_outgoing_subchannels()?;
+
+        // Find a subchannel that we can send
+        let subchannel = self
+            .outgoing_subchannels
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.state == SubChannelState::WaitingToSend);
+
+        if let Some((subchannel_index, subchannel)) = subchannel {
+            assert!(MAX_SUBCHANNELS <= 8);
+            writer.write_out::<3, _>(subchannel_index as u8)?;
+
+            for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
+                if let Some(stream) = streams.front_mut() {
+                    writer.write_bit(true)?;
+
+                    let offset = subchannel.start_fragment[streams_idx] * FRAGMENT_SIZE;
+                    let mut length = subchannel.num_fragments[streams_idx] * FRAGMENT_SIZE;
+
+                    if (subchannel.start_fragment[streams_idx]
+                        + subchannel.num_fragments[streams_idx])
+                        == stream.total_fragments()
+                    {
+                        // we are sending the last fragment, adjust length
+                        let rest = FRAGMENT_SIZE - (stream.total_bytes() % FRAGMENT_SIZE);
+
+                        if rest < FRAGMENT_SIZE {
+                            length -= rest;
+                        }
+                    };
+
+                    let is_single_block =
+                        subchannel.num_fragments[streams_idx] == stream.total_fragments();
+                    writer.write_bit(!is_single_block)?;
+
+                    if is_single_block {
+                        assert_eq!(length, stream.total_bytes());
+                        assert!(length < MAX_RELIABLE_PAYLOAD_SIZE);
+                        assert_eq!(offset, 0);
+
+                        // TODO: compression
+                        // is compressed bit
+                        writer.write_bit(false)?;
+
+                        write_varint32(writer, stream.total_bytes())?;
+                    } else {
+                        writer.write_out::<{ MAX_FILE_SIZE_BITS - FRAGMENT_BITS }, _>(
+                            subchannel.start_fragment[streams_idx],
+                        )?;
+                        writer.write_out::<3, _>(subchannel.num_fragments[streams_idx])?;
+
+                        if offset == 0 {
+                            // TODO: handle file transfers, this will require a bit more work though
+                            // is file transfer bit
+                            writer.write_bit(false)?;
+
+                            // TODO: compression
+                            // is compressed bit
+                            writer.write_bit(false)?;
+
+                            writer.write_out::<MAX_FILE_SIZE_BITS, _>(stream.total_bytes())?;
+                        }
+                    }
+
+                    let offset = usize::try_from(offset)?;
+                    let length = usize::try_from(length)?;
+                    writer.write_bytes(&stream.data.get(offset..offset + length).ok_or_else(
+                        || anyhow!("couldn't get slice for outgoing reliable data"),
+                    )?)?;
+
+                    subchannel.state = SubChannelState::WaitingForAck;
+                    subchannel.send_seq_nr = self.out_sequence_nr.into();
+                } else {
+                    // No data for this stream
+                    writer.write_bit(false)?;
+                }
+            }
+
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    #[instrument(skip_all)]
+    fn update_outgoing_subchannels(&mut self) -> anyhow::Result<()> {
+        let subchannel = self
+            .outgoing_subchannels
+            .iter_mut()
+            .enumerate()
+            .find(|(_, s)| s.state == SubChannelState::Free);
+
+        if let Some((subchannel_index, subchannel)) = subchannel {
+            let mut send_data = false;
+
+            // max number of fragments that may be sent in one packet
+            let mut max_send_fragments: u32 = MAX_RELIABLE_PAYLOAD_SIZE / FRAGMENT_SIZE;
+
+            for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
+                if let Some(stream) = streams.front_mut() {
+                    let sent_fragments = stream.acked_fragments + stream.pending_fragments;
+
+                    if sent_fragments == stream.total_fragments() {
+                        // No data left to send
+                        continue;
+                    };
+
+                    // number of fragments we'll send in this packet
+                    let num_fragments: u32 =
+                        max_send_fragments.min(stream.total_fragments() - sent_fragments);
+
+                    subchannel.start_fragment[streams_idx] = sent_fragments;
+                    subchannel.num_fragments[streams_idx] = num_fragments;
+                    stream.pending_fragments += num_fragments;
+                    send_data = true;
+
+                    if let Some(new_max_send_fragments) =
+                        max_send_fragments.checked_sub(num_fragments)
+                    {
+                        max_send_fragments = new_max_send_fragments;
+                    } else {
+                        // Can't send any more data
+                        break;
+                    }
+                }
+            }
+
+            if send_data {
+                self.out_reliable_state ^= 1 << subchannel_index;
+
+                subchannel.state = SubChannelState::WaitingToSend;
+                subchannel.send_seq_nr = 0;
+                trace!("free subchannel {subchannel_index} has been populated, out_reliable_state is now {:08b}", self.out_reliable_state);
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn queue_reliable_messages(&mut self, messages: &[Message]) -> anyhow::Result<()> {
+        let mut data: Vec<u8> = vec![];
+        let mut writer = BitWriter::endian(Cursor::new(&mut data), LittleEndian);
+
+        for message in messages {
+            message.write(&mut writer)?;
+        }
+
+        // Data must be byte-aligned or we won't write it all, pad with nops
+        writer.byte_align()?;
+
+        let stream = OutgoingReliableData::new(data)?;
+        trace!(
+            "created new reliable stream with {} fragments",
+            stream.total_fragments()
+        );
+
+        // TODO: send reliable file streams too?
+        self.outgoing_reliable_data[0].push_back(stream);
+
+        Ok(())
     }
 }
 
