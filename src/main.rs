@@ -175,8 +175,7 @@ impl Server {
                     warn!("error occured while updating connection: {:?}", err);
                 };
 
-                if false && current_time.duration_since(connection.created_at) > CONNECTION_TIMEOUT
-                {
+                if current_time.duration_since(connection.created_at) > CONNECTION_TIMEOUT {
                     // TODO: maybe we should send a disconnect message before we
                     // kill the connection, so that the client gets some
                     // feedback
