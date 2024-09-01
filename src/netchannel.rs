@@ -394,7 +394,7 @@ impl NetChannel {
         E: bitstream_io::Endianness,
     {
         let is_multi_block = reader.read_bit()?;
-        // trace!("is_multi_block {is_multi_block} [i {stream}]");
+        trace!("is_multi_block {is_multi_block} [i {stream}]");
 
         let mut start_fragment = 0;
         let mut num_fragments = 0;
@@ -408,8 +408,6 @@ impl NetChannel {
             offset = start_fragment * FRAGMENT_SIZE;
             length = num_fragments * FRAGMENT_SIZE;
         }
-
-        // trace!("start_fragment {start_fragment} num_fragments {num_fragments} offset {offset} length {length}");
 
         // Start of subchannel data, let's read the header
         if offset == 0 {
@@ -438,6 +436,7 @@ impl NetChannel {
                 bytes = read_varint32(reader)?;
             }
 
+            trace!("incoming transfer size is {}", bytes);
             let received_data = IncomingReliableData::new(None, bytes)?;
             if !is_multi_block {
                 num_fragments = received_data.total_fragments();
@@ -449,6 +448,8 @@ impl NetChannel {
             self.incoming_reliable_data[stream] = Some(received_data);
         };
 
+        trace!("start_fragment {start_fragment} num_fragments {num_fragments} offset {offset} length {length}");
+
         let received_data = self.incoming_reliable_data[stream]
             .as_mut()
             .ok_or_else(|| anyhow!("no active subchannel data"))?;
@@ -456,7 +457,7 @@ impl NetChannel {
         if (start_fragment + num_fragments) == received_data.total_fragments() {
             // we are receiving the last fragment, adjust length
             let rest = FRAGMENT_SIZE - (received_data.bytes % FRAGMENT_SIZE);
-            // trace!("rest {rest}");
+            trace!("rest {rest}");
 
             if rest < FRAGMENT_SIZE {
                 length -= rest;
@@ -472,12 +473,12 @@ impl NetChannel {
             ));
         }
 
-        // trace!(
-        //     "length {} num_fragments {} bytes {}",
-        //     length,
-        //     num_fragments,
-        //     received_data.bytes
-        // );
+        trace!(
+            "length {} num_fragments {} bytes {}",
+            length,
+            num_fragments,
+            received_data.bytes
+        );
 
         let offset = usize::try_from(offset)?;
         let length = usize::try_from(length)?;

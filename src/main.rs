@@ -14,7 +14,7 @@ use anyhow::anyhow;
 use dashmap::DashMap;
 use message::{Message, MessageDisconnect};
 use netchannel::NetChannel;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, trace};
 
 const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
 const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
@@ -172,7 +172,7 @@ impl Server {
                 let (client_addr, connection) = kv.pair_mut();
 
                 if let Err(err) = connection.tick(true) {
-                    warn!("error occured while updating connection: {:?}", err);
+                    debug!("error occured while updating connection: {:?}", err);
                 };
 
                 if current_time.duration_since(connection.created_at) > CONNECTION_TIMEOUT {
@@ -239,7 +239,7 @@ impl Server {
             let packet_data = &packet_data[..packet_size];
 
             if let Err(err) = self.process_packet(from, packet_data) {
-                warn!("error occured while handling packet: {:?}", err);
+                debug!("error occured while handling packet: {:?}", err);
             };
         }
     }
