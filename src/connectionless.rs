@@ -1,11 +1,12 @@
 use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::Cursor,
-    net::{SocketAddr, UdpSocket},
+    net::SocketAddr,
 };
 
 use anyhow::anyhow;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
+use tokio::net::UdpSocket;
 use tracing::trace;
 
 use crate::{io_util::write_string, CONNECTIONLESS_HEADER};
@@ -29,7 +30,7 @@ fn get_challenge_for_address(addr: SocketAddr) -> u32 {
     hasher.finish() as u32
 }
 
-fn reject_connection(
+async fn reject_connection(
     socket: &UdpSocket,
     from: SocketAddr,
     client_challenge: u32,
@@ -43,12 +44,12 @@ fn reject_connection(
     response.write_out::<32, _>(client_challenge)?; // S2C_CONNREJECT
     write_string(&mut response, message)?;
 
-    socket.send_to(&response_cursor.into_inner(), from)?;
+    socket.send_to(&response_cursor.into_inner(), from).await?;
 
     Ok(())
 }
 
-fn handle_a2s_get_challenge<R: BitRead>(
+async fn handle_a2s_get_challenge<R: BitRead>(
     socket: &UdpSocket,
     from: SocketAddr,
     reader: &mut R,
@@ -68,12 +69,12 @@ fn handle_a2s_get_challenge<R: BitRead>(
     response.write_out::<32, _>(client_challenge)?;
     response.write_out::<32, _>(AUTH_PROTOCOL_HASHEDCDKEY)?;
 
-    socket.send_to(&response_cursor.into_inner(), from)?;
+    socket.send_to(&response_cursor.into_inner(), from).await?;
 
     Ok(())
 }
 
-fn handle_c2s_connect(
+async fn handle_c2s_connect(
     socket: &UdpSocket,
     from: SocketAddr,
     reader: &mut BitReader<Cursor<&[u8]>, LittleEndian>,
@@ -89,7 +90,7 @@ fn handle_c2s_connect(
             from,
             client_challenge,
             "#GameUI_ServerRejectBadChallenge",
-        )?;
+        ).await?;
         return Err(anyhow!(
             "mismatched server challenge: {} != {}",
             server_challenge,
@@ -103,7 +104,7 @@ fn handle_c2s_connect(
             from,
             client_challenge,
             "Unexpected protocol version",
-        )?;
+        ).await?;
         return Err(anyhow!("unexpected protocl version: {protocol_version}"));
     }
 
@@ -113,7 +114,7 @@ fn handle_c2s_connect(
             from,
             client_challenge,
             "unexpected authentication protocol",
-        )?;
+        ).await?;
 
         return Err(anyhow!(
             "unexpected authentication protocol: {}",
@@ -136,12 +137,12 @@ fn handle_c2s_connect(
     response.write_out::<32, _>(client_challenge)?;
     write_string(&mut response, "0000000000")?; // padding
 
-    socket.send_to(&response_cursor.into_inner(), from)?;
+    socket.send_to(&response_cursor.into_inner(), from).await?;
 
     Ok(server_challenge)
 }
 
-fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> anyhow::Result<()> {
+async fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> anyhow::Result<()> {
     // The packet always has the query string, but won't have a challenge value
     // unless we send one back. So if the entire message is the query string, we
     // can send a challenge.
@@ -154,7 +155,7 @@ fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> anyhow:
         response.write_out::<8, _>(b'A')?; // S2C_CHALLENGE
         response.write_out::<32, _>(get_challenge_for_address(from))?;
 
-        socket.send_to(&response_cursor.into_inner(), from)?;
+        socket.send_to(&response_cursor.into_inner(), from).await?;
     } else {
         if data.get(0..A2S_INFO_QUERY_STRING.len()) != Some(A2S_INFO_QUERY_STRING) {
             return Err(anyhow!("query string isn't correct"));
@@ -169,13 +170,13 @@ fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> anyhow:
             return Err(anyhow!("unexpected challenge"));
         };
 
-        send_s2a_info_response(socket, from)?;
+        send_s2a_info_response(socket, from).await?;
     }
 
     Ok(())
 }
 
-fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow::Result<()> {
+async fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow::Result<()> {
     let mut response_cursor = Cursor::new(Vec::<u8>::new());
     let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
 
@@ -196,7 +197,7 @@ fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow::Resul
     response.write_out::<8, _>(0)?; // VAC, 0 for insecure (don't care since any server we redirect to can choose their own policy)
     write_string(&mut response, APP_VERSION)?;
 
-    socket.send_to(&response_cursor.into_inner(), from)?;
+    socket.send_to(&response_cursor.into_inner(), from).await?;
 
     Ok(())
 }
@@ -204,7 +205,7 @@ fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow::Resul
 /// Handle a connectionless packet. Returns a challenge number when the
 /// connection handshake has completed, which should be provided to the
 // netchannel
-pub fn process_connectionless_packet(
+pub async fn process_connectionless_packet(
     socket: &UdpSocket,
     from: SocketAddr,
     data: &[u8],
@@ -220,13 +221,13 @@ pub fn process_connectionless_packet(
 
     match command {
         // A2S_GETCHALLENGE
-        b'q' => handle_a2s_get_challenge(socket, from, &mut reader)?,
+        b'q' => handle_a2s_get_challenge(socket, from, &mut reader).await?,
         // C2S_CONNECT
-        b'k' => return Ok(Some(handle_c2s_connect(socket, from, &mut reader)?)),
+        b'k' => return Ok(Some(handle_c2s_connect(socket, from, &mut reader).await?)),
 
         // A2S_INFO
         // slice access will never panic because the command is 1 byte
-        b'T' => handle_a2s_info(socket, from, &data[1..])?,
+        b'T' => handle_a2s_info(socket, from, &data[1..]).await?,
         // A2S_PLAYER, silently drop
         b'U' => {}
         _ => {
