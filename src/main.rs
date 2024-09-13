@@ -2,6 +2,7 @@ mod connectionless;
 mod io_util;
 mod message;
 mod netchannel;
+mod quickplay;
 
 use std::{
     borrow::Cow,
@@ -12,8 +13,9 @@ use std::{
 };
 
 use anyhow::anyhow;
-use message::{Message, MessageDisconnect};
+use message::{Message, MessageDisconnect, MessageStringCmd};
 use netchannel::NetChannel;
+use quickplay::QuickplaySession;
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, RwLock},
@@ -37,12 +39,12 @@ struct Connection {
     // client_addr: SocketAddr,
     netchan: Arc<Mutex<NetChannel>>,
 
-    state: ConnectionState,
-
     created_at: Instant,
-    marked_for_death: bool,
 
+    marked_for_death: bool,
     _cancel_guard: DropGuard,
+
+    quickplay: QuickplaySession,
 }
 
 impl Connection {
@@ -62,45 +64,49 @@ impl Connection {
             // client_addr,
             netchan,
 
-            state: ConnectionState::Init.into(),
             created_at: Instant::now(),
+
             marked_for_death: false,
             _cancel_guard: cancel_token.drop_guard(),
+
+            quickplay: QuickplaySession::new(),
         }
     }
 
     async fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
         let messages = self.netchan.lock().await.process_packet(data)?;
 
-        for message in &messages {
+        for message in messages {
             trace!("got message {:?}", message);
             match message {
-                Message::SignonState(_) => {
-                    let mut messages = vec![];
-
-                    for i in 0..2000 {
-                        messages.push(Message::Print(message::MessagePrint {
-                            text: format!("🐸✨ {}\n", i),
-                        }));
+                Message::Disconnect(_) => self.marked_for_death = true,
+                Message::SignonState(message) => {
+                    // SIGNONSTATE_CONNECTED = 2
+                    if message.signon_state != 2 {
+                        debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    messages.push(Message::Disconnect(MessageDisconnect {
-                        reason: "Yay".to_string(),
-                    }));
+                    let message = if let Some(destination_server) = self.quickplay.find_match() {
+                        Message::StringCmd(MessageStringCmd {
+                            command: format!("redirect {}", destination_server),
+                        })
+                    } else {
+                        Message::Disconnect(MessageDisconnect {
+                            reason: "No matches found with selected filter".to_string(),
+                        })
+                    };
 
                     self.netchan
                         .lock()
                         .await
-                        .queue_reliable_messages(&messages)?;
+                        .queue_reliable_messages(&[message])?;
                 }
-                Message::Disconnect(_) => self.state = ConnectionState::Disconnected,
+                Message::SetConVars(message) => self
+                    .quickplay
+                    .update_settings_from_convars(&message.convars),
 
                 _ => debug!("received unhandled message: {:?}", message),
             }
-        }
-
-        if self.state == ConnectionState::Disconnected {
-            self.marked_for_death = true;
         }
 
         Ok(())
@@ -130,12 +136,6 @@ impl Connection {
 
         trace!("stopping background task for connection");
     }
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum ConnectionState {
-    Init,
-    Disconnected,
 }
 
 fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {
