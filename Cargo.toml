@@ -8,6 +8,7 @@ anyhow = "1.0.86"
 bitflags = "2.6.0"
 bitstream-io = "2.5.0"
 crc = "3.2.1"
+num_enum = "0.7.3"
 snap = "1.1.1"
 tokio = { version = "1.40.0", features = ["full"] }
 tokio-util = { version = "0.7.12", features = ["full"] }

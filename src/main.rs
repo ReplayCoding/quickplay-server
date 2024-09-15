@@ -101,9 +101,18 @@ impl Connection {
                         .await
                         .queue_reliable_messages(&[message])?;
                 }
-                Message::SetConVars(message) => self
-                    .quickplay
-                    .update_settings_from_convars(&message.convars),
+                Message::SetConVars(message) => {
+                    if let Err(error_message) = self
+                        .quickplay
+                        .update_preferences_from_convars(&message.convars)
+                    {
+                        self.netchan.lock().await.queue_reliable_messages(&[
+                            Message::Disconnect(MessageDisconnect {
+                                reason: error_message,
+                            }),
+                        ])?;
+                    };
+                }
 
                 _ => debug!("received unhandled message: {:?}", message),
             }
