@@ -1,7 +1,13 @@
-use std::{net::SocketAddr, str::FromStr};
+use std::{net::SocketAddr, str::FromStr, sync::Arc};
 
 use bitflags::bitflags;
 use serde::Deserialize;
+use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio_util::sync::{CancellationToken, DropGuard};
+use tracing::{error, info};
+
+// PLACEHOLDER HACK
+const SERVER_LIST_PATH: &str = "/home/user/servers.json";
 
 #[derive(Deserialize, Debug)]
 struct ServerListJson {
@@ -50,7 +56,52 @@ pub struct ServerInfo {
     pub ping: f32,
 }
 
-pub fn load_server_infos_from_json(data: &[u8]) -> anyhow::Result<Vec<ServerInfo>> {
+pub struct ServerListController {
+    servers: RwLock<Vec<ServerInfo>>,
+    _cancel_guard: DropGuard,
+}
+
+impl ServerListController {
+    pub fn new() -> Arc<Self> {
+        let cancel_token = CancellationToken::new();
+        let child_token = cancel_token.child_token();
+
+        let self_ = Arc::new(Self {
+            servers: vec![].into(),
+            _cancel_guard: cancel_token.drop_guard(),
+        });
+
+        tokio::spawn(self_.clone().run_background(child_token));
+
+        self_
+    }
+
+    pub async fn list<'a>(&'a self) -> RwLockReadGuard<Vec<ServerInfo>> {
+        self.servers.read().await
+    }
+
+    async fn run_background(self: Arc<Self>, _cancel_token: CancellationToken) {
+        // HACK TODO terrible testing code, replace me
+        match std::fs::read(SERVER_LIST_PATH) {
+            Ok(server_list_data) => match load_server_infos_from_json(&server_list_data) {
+                Ok(server_list) => {
+                    let mut l = self.servers.write().await;
+                    *l = server_list;
+
+                    info!("loaded server list from file: {} servers total", l.len());
+                }
+                Err(e) => {
+                    error!("error while parsing server list: {}", e);
+                }
+            },
+            Err(e) => {
+                error!("error while loading server list from file: {}", e);
+            }
+        }
+    }
+}
+
+fn load_server_infos_from_json(data: &[u8]) -> anyhow::Result<Vec<ServerInfo>> {
     let raw_servers: ServerListJson = serde_json::from_slice(data)?;
     let parsed_servers = raw_servers
         .servers

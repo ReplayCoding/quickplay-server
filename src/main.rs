@@ -17,7 +17,7 @@ use anyhow::anyhow;
 use message::{Message, MessageDisconnect, MessageStringCmd};
 use netchannel::NetChannel;
 use quickplay::QuickplaySession;
-use server_list::{load_server_infos_from_json, ServerInfo};
+use server_list::ServerListController;
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, RwLock},
@@ -36,9 +36,6 @@ const CONNECTION_UPDATE_DELAY: Duration = Duration::from_millis(500);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 const NUM_PACKET_TASKS: usize = 16;
 
-// PLACEHOLDER HACK
-const SERVER_LIST_PATH: &str = "/home/user/servers.json";
-
 struct Connection {
     // socket: Arc<UdpSocket>,
     // client_addr: SocketAddr,
@@ -50,7 +47,7 @@ struct Connection {
     _cancel_guard: DropGuard,
 
     quickplay: QuickplaySession,
-    server_list: &'static [ServerInfo],
+    server_list: Arc<ServerListController>,
 }
 
 impl Connection {
@@ -58,7 +55,7 @@ impl Connection {
         socket: Arc<UdpSocket>,
         client_addr: SocketAddr,
         netchan: NetChannel,
-        server_list: &'static [ServerInfo],
+        server_list: Arc<ServerListController>,
     ) -> Self {
         let netchan = Arc::new(Mutex::new(netchan));
         let cancel_token = CancellationToken::new();
@@ -98,9 +95,11 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
+                    let server_list = self.server_list.list().await;
+
                     let start = Instant::now();
                     let message = if let Some(destination_server) =
-                        self.quickplay.find_server(&self.server_list)
+                        { self.quickplay.find_server(&server_list) }
                     {
                         Message::StringCmd(MessageStringCmd {
                             command: format!("redirect {}", destination_server),
@@ -204,7 +203,7 @@ struct Server {
     socket: Arc<UdpSocket>,
     _cancel_guard: DropGuard,
 
-    server_list: &'static [ServerInfo],
+    server_list: Arc<ServerListController>,
 }
 
 impl Server {
@@ -218,14 +217,11 @@ impl Server {
             cancel_token.child_token(),
         ));
 
-        let server_list_data = std::fs::read(SERVER_LIST_PATH)?;
-        let server_list = load_server_infos_from_json(&server_list_data)?;
-
         let server = Self {
             connections: connections,
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
-            server_list: server_list.leak(),
+            server_list: ServerListController::new(),
         };
 
         Ok(server)
@@ -284,7 +280,7 @@ impl Server {
                     self.socket.clone(),
                     from,
                     NetChannel::new(challenge),
-                    &self.server_list,
+                    self.server_list.clone(),
                 );
                 debug!("created netchannel for client {:?}", from);
                 self.connections
