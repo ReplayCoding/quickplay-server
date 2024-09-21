@@ -35,10 +35,31 @@
 //             8 gamemodes
 //         9 (?) single var + 6 map bans + 8 gamemodes = 23 total, way under
 
+use std::net::SocketAddr;
+
+use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
+use tracing::trace;
+
+use crate::server_list::{ServerInfo, ServerTags};
 
 const CONVAR_PREFERENCE_PREFIX: &str = "rqp_";
 const MAX_MAP_BANS: usize = 6;
+
+const PING_LOW_SCORE: f32 = 0.9;
+const PING_MIN: f32 = 24.0;
+
+const PING_MED: f32 = 150.0;
+const PING_MED_SCORE: f32 = 0.0;
+
+const PING_HIGH: f32 = 300.0;
+const PING_HIGH_SCORE: f32 = -1.0;
+
+const MIN_PING: f32 = PING_MIN + 1.0;
+const MAX_PING: f32 = PING_MED - 1.0;
+
+const SERVER_HEADROOM: u16 = 1;
+const FULL_PLAYERS: u16 = 24;
 
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u8)]
@@ -84,6 +105,21 @@ enum PreferenceDecodeError {
     UnparseableValue = 0,
     InvalidValue,
     UnknownPreference,
+    PingPreferenceNotInRange,
+}
+
+bitflags! {
+    #[derive(Debug)]
+    struct Gamemodes: u8 {
+        const PAYLOAD        = 1 << 0;
+        const KOTH           = 1 << 1;
+        const ATTACK_DEFENSE = 1 << 2;
+        const CTF            = 1 << 3;
+        const CAPTURE_POINT  = 1 << 4;
+        const PAYLOAD_RACE   = 1 << 5;
+        const ALTERNATIVE    = 1 << 6;
+        const ARENA          = 1 << 7;
+    }
 }
 
 #[derive(Debug)]
@@ -96,11 +132,11 @@ pub struct QuickplaySession {
     class_restrictions: ClassRestrictionsPreference,
     objectives: ObjectivesPreference,
 
-    // ping_preference: u8,
+    ping_preference: u8,
     party_size: u8,
 
     map_bans: [Option<String>; MAX_MAP_BANS],
-    // gamemodes: ...,
+    _gamemodes: Gamemodes,
 }
 
 impl QuickplaySession {
@@ -112,10 +148,11 @@ impl QuickplaySession {
             rtd: RtdPreference::Disabled,
             class_restrictions: ClassRestrictionsPreference::None,
             objectives: ObjectivesPreference::Enabled,
-            // ping_preference: todo!()
+            ping_preference: 50,
             party_size: 1,
             map_bans: std::array::from_fn(|_| None),
-            // gamemodes: todo!(),
+            // Everything except for alternative and arena
+            _gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
         }
     }
 
@@ -137,6 +174,10 @@ impl QuickplaySession {
                         PreferenceDecodeError::UnknownPreference => {
                             format!("Unknown preference \"{name}\"")
                         }
+                        PreferenceDecodeError::PingPreferenceNotInRange => format!(
+                            "Ping preference {value} not within range, minimum {}, maximum {}",
+                            MIN_PING, MAX_PING,
+                        ),
                     });
                 };
             }
@@ -181,6 +222,18 @@ impl QuickplaySession {
                     self.party_size = u8::from_str_radix(&value, 10)
                         .map_err(|_| PreferenceDecodeError::UnparseableValue)?
                 }
+                "ping_preference" => {
+                    let ping_preference = u8::from_str_radix(&value, 10)
+                        .map_err(|_| PreferenceDecodeError::InvalidValue)?;
+
+                    if f32::from(ping_preference) < MIN_PING
+                        || f32::from(ping_preference) > MAX_PING
+                    {
+                        return Err(PreferenceDecodeError::PingPreferenceNotInRange);
+                    }
+
+                    self.ping_preference = ping_preference;
+                }
                 _ => return Err(PreferenceDecodeError::UnknownPreference),
             }
         };
@@ -188,9 +241,223 @@ impl QuickplaySession {
         Ok(())
     }
 
-    pub fn find_match(&self) -> Option<String> {
-        // TODO
-        None
+    pub fn find_server(&self, server_list: &[ServerInfo]) -> Option<SocketAddr> {
+        trace!("preferences are {:#?}", self);
+
+        let (must_match_tags, must_not_match_tags) = self.build_filter_tags();
+
+        let mut best_server: Option<(&ServerInfo, f32)> = None;
+
+        for server in server_list {
+            if !self.filter_server(server, must_match_tags, must_not_match_tags) {
+                continue;
+            }
+
+            let current_server_score = self.recalculate_server_score(server);
+            if current_server_score <= 1.0 {
+                trace!(
+                    "filtered server: {:?}, due to bad score {}",
+                    server,
+                    current_server_score
+                );
+                continue;
+            }
+
+            if let Some((_, best_server_score)) = best_server {
+                if current_server_score > best_server_score {
+                    best_server = Some((server, current_server_score));
+                }
+            } else {
+                best_server = Some((server, current_server_score));
+            }
+        }
+
+        best_server.map(|(s, _)| s.addr)
+    }
+
+    fn build_filter_tags(&self) -> (ServerTags, ServerTags) {
+        let mut must_match_tags = ServerTags::empty();
+        let mut must_not_match_tags = ServerTags::empty();
+
+        match self.random_crits {
+            RandomCritsPreference::Enabled => must_not_match_tags |= ServerTags::NO_CRITS,
+            RandomCritsPreference::Disabled => must_match_tags |= ServerTags::NO_CRITS,
+            RandomCritsPreference::DontCare => {}
+        }
+
+        // FIXME: is this actually correct?
+        match self.respawn_times {
+            RespawnTimesPreference::Default => {
+                must_not_match_tags |= ServerTags::RESPAWN_TIMES | ServerTags::NO_RESPAWN_TIMES
+            }
+            RespawnTimesPreference::Instant => must_match_tags |= ServerTags::NO_RESPAWN_TIMES,
+            RespawnTimesPreference::DontCare => {}
+        }
+
+        match self.rtd {
+            RtdPreference::Enabled => must_match_tags |= ServerTags::RTD,
+            RtdPreference::Disabled => must_not_match_tags |= ServerTags::RTD,
+            RtdPreference::DontCare => {}
+        }
+
+        match self.class_restrictions {
+            ClassRestrictionsPreference::None => {
+                must_not_match_tags |= ServerTags::CLASS_LIMITS | ServerTags::CLASS_BANS
+            }
+            ClassRestrictionsPreference::Limits => must_match_tags |= ServerTags::CLASS_BANS,
+            ClassRestrictionsPreference::LimitsAndBans => {}
+        }
+
+        match self.objectives {
+            ObjectivesPreference::Enabled => must_not_match_tags |= ServerTags::NO_OBJECTIVES,
+            ObjectivesPreference::Disabled => must_match_tags |= ServerTags::NO_OBJECTIVES,
+            ObjectivesPreference::DontCare => {}
+        }
+
+        (must_match_tags, must_not_match_tags)
+    }
+
+    fn filter_server(
+        &self,
+        server: &ServerInfo,
+        must_match_tags: ServerTags,
+        must_not_match_tags: ServerTags,
+    ) -> bool {
+        // TODO: filter by player count
+        // TODO: filter by gamemodes
+        // TODO: server bans?
+
+        if (server.tags & must_match_tags) != must_match_tags {
+            trace!(
+                "filtered server: {:?}, due to must_match_tags {:?}",
+                server,
+                must_match_tags
+            );
+
+            return false;
+        }
+        if !(server.tags & must_not_match_tags).is_empty() {
+            trace!(
+                "filtered server: {:?}, due to must_not_match_tags {:?}",
+                server,
+                server.tags & must_not_match_tags
+            );
+
+            return false;
+        }
+
+        for banned_map in &self.map_bans {
+            if let Some(banned_map) = banned_map {
+                if server.map == *banned_map {
+                    trace!(
+                        "filtered server: {:?}, due to banned map {}",
+                        server,
+                        banned_map
+                    );
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn recalculate_server_score(&self, server: &ServerInfo) -> f32 {
+        server.score + self.score_server_for_user(server) + self.score_server(server)
+    }
+
+    fn score_server_for_user(&self, server: &ServerInfo) -> f32 {
+        // TODO: recalculate ping based on user location
+        let mut score: f32 = 0.0;
+        let ping = server.ping;
+
+        if ping <= PING_MIN {
+            score += 1.0;
+        } else if ping < self.ping_preference.into() {
+            score += lerp(
+                PING_MIN,
+                self.ping_preference.into(),
+                1.0,
+                PING_LOW_SCORE,
+                ping,
+            );
+        } else if ping < PING_MED {
+            score += lerp(
+                self.ping_preference.into(),
+                PING_MED,
+                PING_LOW_SCORE,
+                PING_MED_SCORE,
+                ping,
+            );
+        } else {
+            score += lerp(PING_MED, PING_HIGH, PING_MED_SCORE, PING_HIGH_SCORE, ping);
+        }
+
+        score
+    }
+
+    fn score_server(&self, server: &ServerInfo) -> f32 {
+        if self.party_size <= 1 {
+            return 0.0;
+        }
+
+        let default_score = Self::score_server_by_players(server.players, server.max_players, 1);
+        let new_score =
+            Self::score_server_by_players(server.players, server.max_players, self.party_size);
+
+        new_score - default_score
+    }
+
+    fn score_server_by_players(players: u8, max_players: u8, party_size: u8) -> f32 {
+        let new_player_count = u16::from(players) + u16::from(party_size);
+
+        if (new_player_count + SERVER_HEADROOM) > max_players.into() {
+            return -100.0;
+        }
+
+        let mut new_max_players = u16::from(max_players);
+        if u16::from(max_players) > FULL_PLAYERS {
+            new_max_players = u16::from(max_players) - FULL_PLAYERS;
+        }
+
+        if players == 0 {
+            return -0.3;
+        }
+
+        let count_low = to_nearest_even(f32::from(max_players) / 3.0);
+        let count_ideal = to_nearest_even(f32::from(max_players) * 0.72);
+
+        const SCORE_LOW: f32 = 0.1;
+        const SCORE_IDEAL: f32 = 1.6;
+        const SCORE_FULLER: f32 = 0.2;
+
+        if f32::from(new_player_count) <= count_low {
+            return lerp(0.0, count_low, 0.0, SCORE_LOW, new_player_count.into());
+        } else if f32::from(new_player_count) <= count_ideal {
+            return lerp(
+                count_low,
+                count_ideal,
+                SCORE_LOW,
+                SCORE_IDEAL,
+                new_player_count.into(),
+            );
+        } else if new_player_count <= new_max_players {
+            return lerp(
+                count_ideal,
+                new_max_players.into(),
+                SCORE_IDEAL,
+                SCORE_FULLER,
+                new_player_count.into(),
+            );
+        } else {
+            return lerp(
+                new_max_players.into(),
+                max_players.into(),
+                SCORE_FULLER,
+                SCORE_LOW,
+                new_player_count.into(),
+            );
+        }
     }
 }
 
@@ -201,4 +468,12 @@ fn decode_enum_preference<P: TryFromPrimitive<Primitive = u8>>(
         u8::from_str_radix(value, 10).map_err(|_| PreferenceDecodeError::UnparseableValue)?;
 
     P::try_from_primitive(value).map_err(|_| PreferenceDecodeError::InvalidValue)
+}
+
+fn lerp(in_a: f32, in_b: f32, out_a: f32, out_b: f32, x: f32) -> f32 {
+    out_a + ((out_b - out_a) * (x - in_a)) / (in_b - in_a)
+}
+
+fn to_nearest_even(num: f32) -> f32 {
+    2.0 * (num / 2.0).round()
 }

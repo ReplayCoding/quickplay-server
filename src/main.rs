@@ -3,6 +3,7 @@ mod io_util;
 mod message;
 mod netchannel;
 mod quickplay;
+mod server_list;
 
 use std::{
     borrow::Cow,
@@ -16,6 +17,7 @@ use anyhow::anyhow;
 use message::{Message, MessageDisconnect, MessageStringCmd};
 use netchannel::NetChannel;
 use quickplay::QuickplaySession;
+use server_list::{load_server_infos_from_json, ServerInfo};
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, RwLock},
@@ -34,6 +36,9 @@ const CONNECTION_UPDATE_DELAY: Duration = Duration::from_millis(500);
 const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
 const NUM_PACKET_TASKS: usize = 16;
 
+// PLACEHOLDER HACK
+const SERVER_LIST_PATH: &str = "/home/user/servers.json";
+
 struct Connection {
     // socket: Arc<UdpSocket>,
     // client_addr: SocketAddr,
@@ -45,10 +50,16 @@ struct Connection {
     _cancel_guard: DropGuard,
 
     quickplay: QuickplaySession,
+    server_list: &'static [ServerInfo],
 }
 
 impl Connection {
-    fn new(socket: Arc<UdpSocket>, client_addr: SocketAddr, netchan: NetChannel) -> Self {
+    fn new(
+        socket: Arc<UdpSocket>,
+        client_addr: SocketAddr,
+        netchan: NetChannel,
+        server_list: &'static [ServerInfo],
+    ) -> Self {
         let netchan = Arc::new(Mutex::new(netchan));
         let cancel_token = CancellationToken::new();
 
@@ -70,6 +81,7 @@ impl Connection {
             _cancel_guard: cancel_token.drop_guard(),
 
             quickplay: QuickplaySession::new(),
+            server_list,
         }
     }
 
@@ -86,7 +98,10 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    let message = if let Some(destination_server) = self.quickplay.find_match() {
+                    let start = Instant::now();
+                    let message = if let Some(destination_server) =
+                        self.quickplay.find_server(&self.server_list)
+                    {
                         Message::StringCmd(MessageStringCmd {
                             command: format!("redirect {}", destination_server),
                         })
@@ -95,6 +110,7 @@ impl Connection {
                             reason: "No matches found with selected filter".to_string(),
                         })
                     };
+                    trace!("quickplay search took {:?}", start.elapsed());
 
                     self.netchan
                         .lock()
@@ -187,10 +203,12 @@ struct Server {
     connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>>,
     socket: Arc<UdpSocket>,
     _cancel_guard: DropGuard,
+
+    server_list: &'static [ServerInfo],
 }
 
 impl Server {
-    fn new(socket: UdpSocket) -> Self {
+    fn new(socket: UdpSocket) -> anyhow::Result<Self> {
         let connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>> =
             Arc::new(HashMap::new().into());
 
@@ -200,13 +218,17 @@ impl Server {
             cancel_token.child_token(),
         ));
 
+        let server_list_data = std::fs::read(SERVER_LIST_PATH)?;
+        let server_list = load_server_infos_from_json(&server_list_data)?;
+
         let server = Self {
             connections: connections,
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
+            server_list: server_list.leak(),
         };
 
-        server
+        Ok(server)
     }
 
     async fn connection_killer(
@@ -258,8 +280,12 @@ impl Server {
                 connectionless::process_connectionless_packet(&self.socket, from, packet_data)
                     .await?
             {
-                let connection =
-                    Connection::new(self.socket.clone(), from, NetChannel::new(challenge));
+                let connection = Connection::new(
+                    self.socket.clone(),
+                    from,
+                    NetChannel::new(challenge),
+                    &self.server_list,
+                );
                 debug!("created netchannel for client {:?}", from);
                 self.connections
                     .write()
@@ -310,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = UdpSocket::bind("127.0.0.2:4444").await?;
     info!("bound to address {:?}", socket.local_addr()?);
 
-    let server = Box::leak(Server::new(socket).into());
+    let server = Box::leak(Server::new(socket)?.into());
 
     let mut tasks = JoinSet::new();
 

@@ -90,7 +90,8 @@ async fn handle_c2s_connect(
             from,
             client_challenge,
             "#GameUI_ServerRejectBadChallenge",
-        ).await?;
+        )
+        .await?;
         return Err(anyhow!(
             "mismatched server challenge: {} != {}",
             server_challenge,
@@ -98,13 +99,14 @@ async fn handle_c2s_connect(
         ));
     };
 
-    if protocol_version != PROTOCOL_VERSION.into() {
+    if protocol_version != u32::from(PROTOCOL_VERSION) {
         reject_connection(
             socket,
             from,
             client_challenge,
             "Unexpected protocol version",
-        ).await?;
+        )
+        .await?;
         return Err(anyhow!("unexpected protocl version: {protocol_version}"));
     }
 
@@ -114,7 +116,8 @@ async fn handle_c2s_connect(
             from,
             client_challenge,
             "unexpected authentication protocol",
-        ).await?;
+        )
+        .await?;
 
         return Err(anyhow!(
             "unexpected authentication protocol: {}",
