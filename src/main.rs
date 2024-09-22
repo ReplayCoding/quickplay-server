@@ -357,7 +357,11 @@ impl Server {
 struct Arguments {
     /// the path to the configuration to load
     #[argh(option)]
-    configuration: PathBuf,
+    configuration: Option<PathBuf>,
+
+    /// dump the current configuration to standard output
+    #[argh(switch)]
+    dump_configuration: bool,
 }
 
 #[tokio::main]
@@ -365,29 +369,34 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args: Arguments = argh::from_env();
 
-    match Configuration::load_from_file(&args.configuration) {
-        Ok(configuration) => {
-            let configuration = Box::leak(Box::new(configuration));
+    let configuration = if let Some(configuration) = &args.configuration {
+        Configuration::load_from_file(configuration)?
+    } else {
+        warn!("no configuration provided, using defaults");
+        Configuration::load_default()
+    };
 
-            let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
-
-            let socket = UdpSocket::bind(bind_address).await?;
-            info!("bound to address {:?}", socket.local_addr()?);
-
-            let server = Box::leak(Server::new(socket, configuration)?.into());
-
-            let mut tasks = JoinSet::new();
-
-            for _ in 0..configuration.server.num_packet_tasks {
-                tasks.spawn(server.receive_packets());
-            }
-
-            tasks.join_all().await;
-        }
-        Err(e) => {
-            println!("error while loading configuration: {}", e);
-        }
+    if args.dump_configuration {
+        println!("{}", toml::to_string_pretty(&configuration)?);
+        return Ok(());
     }
+
+    let configuration = Box::leak(Box::new(configuration));
+
+    let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
+
+    let socket = UdpSocket::bind(bind_address).await?;
+    info!("bound to address {:?}", socket.local_addr()?);
+
+    let server = Box::leak(Server::new(socket, configuration)?.into());
+
+    let mut tasks = JoinSet::new();
+
+    for _ in 0..configuration.server.num_packet_tasks {
+        tasks.spawn(server.receive_packets());
+    }
+
+    tasks.join_all().await;
 
     Ok(())
 }

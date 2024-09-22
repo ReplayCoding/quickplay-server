@@ -1,14 +1,14 @@
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct QuickplayConfiguration {
     /// the prefix that all user preferences will start with
     pub preference_convar_prefix: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ServerConfiguration {
     /// the address and port that the server will bind to
     pub bind_address: String,
@@ -37,7 +37,7 @@ pub struct ServerConfiguration {
     pub server_name: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Configuration {
     pub server: ServerConfiguration,
     pub quickplay: QuickplayConfiguration,
