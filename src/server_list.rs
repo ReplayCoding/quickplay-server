@@ -57,21 +57,21 @@ pub struct ServerInfo {
 }
 
 pub struct ServerListController {
-    servers: RwLock<Vec<ServerInfo>>,
+    servers: Arc<RwLock<Vec<ServerInfo>>>,
     _cancel_guard: DropGuard,
 }
 
 impl ServerListController {
-    pub fn new() -> Arc<Self> {
+    pub fn new() -> Self {
         let cancel_token = CancellationToken::new();
         let child_token = cancel_token.child_token();
 
-        let self_ = Arc::new(Self {
-            servers: vec![].into(),
+        let self_ = Self {
+            servers: Arc::new(vec![].into()),
             _cancel_guard: cancel_token.drop_guard(),
-        });
+        };
 
-        tokio::spawn(self_.clone().run_background(child_token));
+        tokio::spawn(Self::run_background(self_.servers.clone(), child_token));
 
         self_
     }
@@ -80,12 +80,15 @@ impl ServerListController {
         self.servers.read().await
     }
 
-    async fn run_background(self: Arc<Self>, _cancel_token: CancellationToken) {
+    async fn run_background(
+        servers: Arc<RwLock<Vec<ServerInfo>>>,
+        _cancel_token: CancellationToken,
+    ) {
         // HACK TODO terrible testing code, replace me
         match std::fs::read(SERVER_LIST_PATH) {
             Ok(server_list_data) => match load_server_infos_from_json(&server_list_data) {
                 Ok(server_list) => {
-                    let mut l = self.servers.write().await;
+                    let mut l = servers.write().await;
                     *l = server_list;
 
                     info!("loaded server list from file: {} servers total", l.len());

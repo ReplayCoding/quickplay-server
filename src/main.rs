@@ -235,7 +235,7 @@ impl Server {
             connections: connections,
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
-            server_list: ServerListController::new(),
+            server_list: Arc::new(ServerListController::new()),
 
             configuration,
         };
