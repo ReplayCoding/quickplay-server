@@ -9,16 +9,12 @@ use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tokio::net::UdpSocket;
 use tracing::trace;
 
-use crate::{io_util::write_string, CONNECTIONLESS_HEADER};
+use crate::{configuration::Configuration, io_util::write_string, CONNECTIONLESS_HEADER};
 
 const PROTOCOL_VERSION: u8 = 24;
 const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;
 
 const A2S_INFO_QUERY_STRING: &[u8; 20] = b"Source Engine Query\0";
-const APP_ID: u16 = 440;
-const APP_DESC: &str = "Team Fortress 2";
-const APP_VERSION: &str = "";
-const SERVER_NAME: &str = "ReplayCoding's awesome custom server";
 
 /// Create an opaque challenge number for an address, which will be consistent for this address
 fn get_challenge_for_address(addr: SocketAddr) -> u32 {
@@ -145,7 +141,12 @@ async fn handle_c2s_connect(
     Ok(server_challenge)
 }
 
-async fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> anyhow::Result<()> {
+async fn handle_a2s_info(
+    socket: &UdpSocket,
+    from: SocketAddr,
+    data: &[u8],
+    configuration: &Configuration,
+) -> anyhow::Result<()> {
     // The packet always has the query string, but won't have a challenge value
     // unless we send one back. So if the entire message is the query string, we
     // can send a challenge.
@@ -173,24 +174,28 @@ async fn handle_a2s_info(socket: &UdpSocket, from: SocketAddr, data: &[u8]) -> a
             return Err(anyhow!("unexpected challenge"));
         };
 
-        send_s2a_info_response(socket, from).await?;
+        send_s2a_info_response(socket, from, configuration).await?;
     }
 
     Ok(())
 }
 
-async fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow::Result<()> {
+async fn send_s2a_info_response(
+    socket: &UdpSocket,
+    from: SocketAddr,
+    configuration: &Configuration,
+) -> anyhow::Result<()> {
     let mut response_cursor = Cursor::new(Vec::<u8>::new());
     let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
 
     response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
     response.write_out::<8, _>(b'I')?; // S2A_INFO_SRC
     response.write_out::<8, _>(PROTOCOL_VERSION)?;
-    write_string(&mut response, SERVER_NAME)?;
+    write_string(&mut response, &configuration.server.server_name)?; // server name
     write_string(&mut response, "")?; // map name
     write_string(&mut response, "")?; // game dir
-    write_string(&mut response, APP_DESC)?; // game description
-    response.write_out::<16, _>(APP_ID)?;
+    write_string(&mut response, &configuration.server.app_desc)?; // game description
+    response.write_out::<16, _>(configuration.server.app_id)?; // app id
     response.write_out::<8, _>(0)?; // player count
     response.write_out::<8, _>(0)?; // max players
     response.write_out::<8, _>(0)?; // bot count
@@ -198,7 +203,7 @@ async fn send_s2a_info_response(socket: &UdpSocket, from: SocketAddr) -> anyhow:
     response.write_out::<8, _>(b'l')?; // OS, hardcoded to linux for now
     response.write_out::<8, _>(0)?; // visibility, 0 for public
     response.write_out::<8, _>(0)?; // VAC, 0 for insecure (don't care since any server we redirect to can choose their own policy)
-    write_string(&mut response, APP_VERSION)?;
+    write_string(&mut response, &configuration.server.app_version)?; // app version
 
     socket.send_to(&response_cursor.into_inner(), from).await?;
 
@@ -212,6 +217,7 @@ pub async fn process_connectionless_packet(
     socket: &UdpSocket,
     from: SocketAddr,
     data: &[u8],
+    configuration: &Configuration,
 ) -> anyhow::Result<Option<u32>> {
     // Cut off connectionless header
     let data = data
@@ -230,7 +236,7 @@ pub async fn process_connectionless_packet(
 
         // A2S_INFO
         // slice access will never panic because the command is 1 byte
-        b'T' => handle_a2s_info(socket, from, &data[1..]).await?,
+        b'T' => handle_a2s_info(socket, from, &data[1..], configuration).await?,
         // A2S_PLAYER, silently drop
         b'U' => {}
         _ => {

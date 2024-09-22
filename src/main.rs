@@ -1,3 +1,4 @@
+mod configuration;
 mod connectionless;
 mod io_util;
 mod message;
@@ -9,11 +10,15 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use anyhow::anyhow;
+use argh::FromArgs;
+use configuration::Configuration;
 use message::{Message, MessageDisconnect, MessageStringCmd};
 use netchannel::NetChannel;
 use quickplay::QuickplaySession;
@@ -32,10 +37,6 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-const CONNECTION_UPDATE_DELAY: Duration = Duration::from_millis(500);
-const CONNECTION_TIMEOUT: Duration = Duration::from_secs(20);
-const NUM_PACKET_TASKS: usize = 16;
-
 struct Connection {
     // socket: Arc<UdpSocket>,
     // client_addr: SocketAddr,
@@ -48,6 +49,8 @@ struct Connection {
 
     quickplay: QuickplaySession,
     server_list: Arc<ServerListController>,
+
+    configuration: &'static Configuration,
 }
 
 impl Connection {
@@ -56,6 +59,7 @@ impl Connection {
         client_addr: SocketAddr,
         netchan: NetChannel,
         server_list: Arc<ServerListController>,
+        configuration: &'static Configuration,
     ) -> Self {
         let netchan = Arc::new(Mutex::new(netchan));
         let cancel_token = CancellationToken::new();
@@ -65,6 +69,7 @@ impl Connection {
             client_addr,
             netchan.clone(),
             cancel_token.child_token(),
+            configuration,
         ));
 
         Self {
@@ -77,8 +82,10 @@ impl Connection {
             marked_for_death: false,
             _cancel_guard: cancel_token.drop_guard(),
 
-            quickplay: QuickplaySession::new(),
+            quickplay: QuickplaySession::new(configuration),
             server_list,
+
+            configuration,
         }
     }
 
@@ -141,6 +148,7 @@ impl Connection {
         client_addr: SocketAddr,
         netchan: Arc<Mutex<NetChannel>>,
         cancel_token: CancellationToken,
+        configuration: &'static Configuration,
     ) {
         while !cancel_token.is_cancelled() {
             // allow the netchannel to send remaining reliable data
@@ -155,7 +163,10 @@ impl Connection {
                 }
             };
 
-            tokio::time::sleep(CONNECTION_UPDATE_DELAY).await;
+            tokio::time::sleep(Duration::from_millis(
+                configuration.server.connection_update_delay,
+            ))
+            .await;
         }
 
         trace!("stopping background task for connection");
@@ -204,10 +215,12 @@ struct Server {
     _cancel_guard: DropGuard,
 
     server_list: Arc<ServerListController>,
+
+    configuration: &'static Configuration,
 }
 
 impl Server {
-    fn new(socket: UdpSocket) -> anyhow::Result<Self> {
+    fn new(socket: UdpSocket, configuration: &'static Configuration) -> anyhow::Result<Self> {
         let connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>> =
             Arc::new(HashMap::new().into());
 
@@ -215,6 +228,7 @@ impl Server {
         tokio::spawn(Self::connection_killer(
             connections.clone(),
             cancel_token.child_token(),
+            configuration,
         ));
 
         let server = Self {
@@ -222,6 +236,8 @@ impl Server {
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
             server_list: ServerListController::new(),
+
+            configuration,
         };
 
         Ok(server)
@@ -230,6 +246,7 @@ impl Server {
     async fn connection_killer(
         connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>>,
         cancel_token: CancellationToken,
+        configuration: &'static Configuration,
     ) {
         while !cancel_token.is_cancelled() {
             let current_time = Instant::now();
@@ -238,7 +255,9 @@ impl Server {
             for (client_addr, connection) in connections.read().await.iter() {
                 let mut connection = connection.write().await;
 
-                if current_time.duration_since(connection.created_at) > CONNECTION_TIMEOUT {
+                if current_time.duration_since(connection.created_at)
+                    > Duration::from_millis(configuration.server.connection_timeout)
+                {
                     // TODO: maybe we should send a disconnect message before we
                     // kill the connection, so that the client gets some
                     // feedback
@@ -262,7 +281,10 @@ impl Server {
                 }
             }
 
-            tokio::time::sleep(CONNECTION_UPDATE_DELAY).await;
+            tokio::time::sleep(Duration::from_millis(
+                configuration.server.connection_update_delay,
+            ))
+            .await;
         }
     }
 
@@ -272,15 +294,20 @@ impl Server {
             .ok_or_else(|| anyhow!("couldn't get header flags"))?;
 
         if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-            if let Some(challenge) =
-                connectionless::process_connectionless_packet(&self.socket, from, packet_data)
-                    .await?
+            if let Some(challenge) = connectionless::process_connectionless_packet(
+                &self.socket,
+                from,
+                packet_data,
+                self.configuration,
+            )
+            .await?
             {
                 let connection = Connection::new(
                     self.socket.clone(),
                     from,
-                    NetChannel::new(challenge),
+                    NetChannel::new(challenge, self.configuration),
                     self.server_list.clone(),
+                    self.configuration,
                 );
                 debug!("created netchannel for client {:?}", from);
                 self.connections
@@ -325,22 +352,42 @@ impl Server {
     }
 }
 
+#[derive(FromArgs)]
+#[argh(description = "Quickplay Server")]
+struct Arguments {
+    /// the path to the configuration to load
+    #[argh(option)]
+    configuration: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
+    let args: Arguments = argh::from_env();
 
-    let socket = UdpSocket::bind("127.0.0.2:4444").await?;
-    info!("bound to address {:?}", socket.local_addr()?);
+    match Configuration::load_from_file(&args.configuration) {
+        Ok(configuration) => {
+            let configuration = Box::leak(Box::new(configuration));
 
-    let server = Box::leak(Server::new(socket)?.into());
+            let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
 
-    let mut tasks = JoinSet::new();
+            let socket = UdpSocket::bind(bind_address).await?;
+            info!("bound to address {:?}", socket.local_addr()?);
 
-    for _ in 0..NUM_PACKET_TASKS {
-        tasks.spawn(server.receive_packets());
+            let server = Box::leak(Server::new(socket, configuration)?.into());
+
+            let mut tasks = JoinSet::new();
+
+            for _ in 0..configuration.server.num_packet_tasks {
+                tasks.spawn(server.receive_packets());
+            }
+
+            tasks.join_all().await;
+        }
+        Err(e) => {
+            println!("error while loading configuration: {}", e);
+        }
     }
-
-    tasks.join_all().await;
 
     Ok(())
 }

@@ -26,21 +26,16 @@ use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tracing::{instrument, trace};
 
 use crate::{
+    configuration::Configuration,
     io_util::{read_varint32, write_varint32},
     message::Message,
 };
-
-// TODO: what is the optimal value for us? We probably aren't
-// ever going to send 5000 packets
-const MAX_PACKETS_DROPPED: u32 = 5000;
 
 const MAX_STREAMS: usize = 2; // 0 == regular, 1 == file stream
 const MAX_SUBCHANNELS: usize = 8;
 
 const FRAGMENT_BITS: u32 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
-
-const MAX_RELIABLE_PAYLOAD_SIZE: u32 = 1024 /* 288000 */;
 
 const MAX_FILE_SIZE_BITS: u32 = 26;
 
@@ -170,10 +165,12 @@ pub struct NetChannel {
     out_reliable_state: u8,
     outgoing_reliable_data: [VecDeque<OutgoingReliableData>; MAX_STREAMS],
     outgoing_subchannels: [SubChannel; MAX_SUBCHANNELS],
+
+    configuration: &'static Configuration,
 }
 
 impl NetChannel {
-    pub fn new(challenge: u32) -> Self {
+    pub fn new(challenge: u32, configuration: &'static Configuration) -> Self {
         Self {
             out_sequence_nr: 1,
             out_sequence_nr_ack: 0,
@@ -189,6 +186,8 @@ impl NetChannel {
             out_reliable_state: 0,
             outgoing_reliable_data: std::array::from_fn(|_| VecDeque::new()),
             outgoing_subchannels: std::array::from_fn(|_| SubChannel::new_free()),
+
+            configuration,
         }
     }
 
@@ -293,8 +292,9 @@ impl NetChannel {
             trace!("dropped {num_packets_dropped} packets");
         }
 
-        if num_packets_dropped > MAX_PACKETS_DROPPED {
-            return Err(anyhow!("number of packets dropped ({num_packets_dropped}) has exceeded maximum allowed ({MAX_PACKETS_DROPPED})"));
+        // TODO: is this even necessary?
+        if num_packets_dropped > self.configuration.server.max_packets_dropped {
+            return Err(anyhow!("number of packets dropped ({num_packets_dropped}) has exceeded maximum allowed ({})", self.configuration.server.max_packets_dropped));
         }
 
         self.update_outgoing_subchannel_ack(sequence_ack, reliable_state)?;
@@ -666,7 +666,7 @@ impl NetChannel {
 
                     if is_single_block {
                         assert_eq!(length, stream.total_bytes());
-                        assert!(length < MAX_RELIABLE_PAYLOAD_SIZE);
+                        assert!(length < self.configuration.server.max_reliable_packet_size);
                         assert_eq!(offset, 0);
 
                         // TODO: compression
@@ -725,7 +725,8 @@ impl NetChannel {
             let mut send_data = false;
 
             // max number of fragments that may be sent in one packet
-            let mut max_send_fragments: u32 = MAX_RELIABLE_PAYLOAD_SIZE / FRAGMENT_SIZE;
+            let mut max_send_fragments: u32 =
+                self.configuration.server.max_reliable_packet_size / FRAGMENT_SIZE;
 
             for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
                 if let Some(stream) = streams.front_mut() {
@@ -801,8 +802,10 @@ fn calculate_checksum(bytes: &[u8]) -> u16 {
 
 #[test]
 fn test_netchannels() {
-    let mut server_channel = NetChannel::new(0);
-    let mut client_channel = NetChannel::new(0);
+    let configuration = Box::leak(Box::new(Configuration::load_default()));
+
+    let mut server_channel = NetChannel::new(0, configuration);
+    let mut client_channel = NetChannel::new(0, configuration);
 
     let messages = [Message::Print(crate::message::MessagePrint {
         text: "0".to_string(),

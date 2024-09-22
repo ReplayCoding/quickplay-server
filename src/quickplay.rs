@@ -41,9 +41,12 @@ use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
 use tracing::trace;
 
-use crate::server_list::{ServerInfo, ServerTags};
+use crate::{
+    configuration::Configuration,
+    server_list::{ServerInfo, ServerTags},
+};
 
-const CONVAR_PREFERENCE_PREFIX: &str = "rqp_";
+// Maybe move this to config?
 const MAX_MAP_BANS: usize = 6;
 
 const PING_LOW_SCORE: f32 = 0.9;
@@ -137,10 +140,12 @@ pub struct QuickplaySession {
 
     map_bans: [Option<String>; MAX_MAP_BANS],
     _gamemodes: Gamemodes,
+
+    configuration: &'static Configuration,
 }
 
 impl QuickplaySession {
-    pub fn new() -> Self {
+    pub fn new(configuration: &'static Configuration) -> Self {
         Self {
             // server_capacity: todo!(),
             random_crits: RandomCritsPreference::DontCare,
@@ -153,6 +158,8 @@ impl QuickplaySession {
             map_bans: std::array::from_fn(|_| None),
             // Everything except for alternative and arena
             _gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
+
+            configuration,
         }
     }
 
@@ -161,8 +168,10 @@ impl QuickplaySession {
         convars: &[(String, String)],
     ) -> Result<(), String> {
         for (name, value) in convars {
-            if name.starts_with(CONVAR_PREFERENCE_PREFIX) {
-                let name = &name[CONVAR_PREFERENCE_PREFIX.len()..];
+            let prefix = &self.configuration.quickplay.preference_convar_prefix;
+
+            if name.starts_with(prefix) {
+                let name = &name[prefix.len()..];
                 if let Err(err_type) = self.update_preference(name, value) {
                     return Err(match err_type {
                         PreferenceDecodeError::UnparseableValue => {
