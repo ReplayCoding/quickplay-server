@@ -146,5 +146,14 @@ fn string_tags_to_flags(str_tags: &[String]) -> ServerTags {
 
 #[test]
 fn test_string_tags_to_flags() {
-    // TODO
+    assert_eq!(
+        string_tags_to_flags(&["nocrits".to_string()]),
+        ServerTags::NO_CRITS
+    );
+    assert_eq!(
+        string_tags_to_flags(&["norespawntime".to_string(), "dummy_tag".to_string()]),
+        ServerTags::NO_RESPAWN_TIMES
+    );
+
+    assert_eq!(string_tags_to_flags(&[]), ServerTags::empty());
 }
