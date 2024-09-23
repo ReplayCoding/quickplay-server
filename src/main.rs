@@ -49,8 +49,6 @@ struct Connection {
 
     quickplay: QuickplaySession,
     server_list: Arc<ServerListController>,
-
-    configuration: &'static Configuration,
 }
 
 impl Connection {
@@ -84,8 +82,6 @@ impl Connection {
 
             quickplay: QuickplaySession::new(configuration),
             server_list,
-
-            configuration,
         }
     }
 
@@ -232,7 +228,7 @@ impl Server {
         ));
 
         let server = Self {
-            connections: connections,
+            connections,
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
             server_list: Arc::new(ServerListController::new()),

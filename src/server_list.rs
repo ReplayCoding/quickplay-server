@@ -76,7 +76,7 @@ impl ServerListController {
         self_
     }
 
-    pub async fn list<'a>(&'a self) -> RwLockReadGuard<Vec<ServerInfo>> {
+    pub async fn list(&self) -> RwLockReadGuard<Vec<ServerInfo>> {
         self.servers.read().await
     }
 

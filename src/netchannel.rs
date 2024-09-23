@@ -349,17 +349,15 @@ impl NetChannel {
 
                     *subchannel = SubChannel::new_free();
                 }
-            } else {
-                if subchannel.send_seq_nr <= sequence_ack.into() {
-                    if subchannel.state == SubChannelState::Free {
-                        return Err(anyhow!("subchannel should not be free here!"));
-                    }
+            } else if subchannel.send_seq_nr <= sequence_ack.into() {
+                if subchannel.state == SubChannelState::Free {
+                    return Err(anyhow!("subchannel should not be free here!"));
+                }
 
-                    if subchannel.state == SubChannelState::WaitingForAck {
-                        subchannel.state = SubChannelState::WaitingToSend;
+                if subchannel.state == SubChannelState::WaitingForAck {
+                    subchannel.state = SubChannelState::WaitingToSend;
 
-                        trace!("resending subchannel {}", subchannel_index);
-                    }
+                    trace!("resending subchannel {}", subchannel_index);
                 }
             }
         }
@@ -411,9 +409,7 @@ impl NetChannel {
 
         // Start of subchannel data, let's read the header
         if offset == 0 {
-            let bytes: u32;
-
-            if is_multi_block {
+            let bytes: u32 = if is_multi_block {
                 // is file?
                 if reader.read_bit()? {
                     return Err(anyhow!("file transfer"));
@@ -426,15 +422,15 @@ impl NetChannel {
                     return Err(anyhow!("compressed data"));
                 }
 
-                bytes = reader.read_in::<MAX_FILE_SIZE_BITS, _>()?;
+                reader.read_in::<MAX_FILE_SIZE_BITS, _>()?
             } else {
                 // is compressed?
                 if reader.read_bit()? {
                     return Err(anyhow!("compressed data"));
                 }
 
-                bytes = read_varint32(reader)?;
-            }
+                read_varint32(reader)?
+            };
 
             trace!("incoming transfer size is {}", bytes);
             let received_data = IncomingReliableData::new(None, bytes)?;
@@ -695,7 +691,7 @@ impl NetChannel {
 
                     let offset = usize::try_from(offset)?;
                     let length = usize::try_from(length)?;
-                    writer.write_bytes(&stream.data.get(offset..offset + length).ok_or_else(
+                    writer.write_bytes(stream.data.get(offset..offset + length).ok_or_else(
                         || anyhow!("couldn't get slice for outgoing reliable data"),
                     )?)?;
 
@@ -796,8 +792,8 @@ impl NetChannel {
 fn calculate_checksum(bytes: &[u8]) -> u16 {
     let crc_hasher = crc::Crc::<u32>::new(&crc::CRC_32_ISO_HDLC);
     let calculated_digest = crc_hasher.checksum(bytes);
-    let calculated_checksum = (((calculated_digest >> 16) ^ calculated_digest) & 0xffff) as u16;
-    calculated_checksum
+
+    (((calculated_digest >> 16) ^ calculated_digest) & 0xffff) as u16
 }
 
 #[test]

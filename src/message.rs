@@ -30,8 +30,7 @@ impl Message {
             }
             MESSAGE_TYPE_SET_CON_VAR => {
                 let num_vars: u8 = reader.read_in::<8, _>()?;
-                let mut convars = vec![];
-                convars.reserve(num_vars.into());
+                let mut convars = Vec::with_capacity(num_vars.into());
 
                 for _ in 0..num_vars {
                     let name = read_string(reader, 260)?;

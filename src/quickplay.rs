@@ -195,22 +195,18 @@ impl QuickplaySession {
         Ok(())
     }
 
-    fn update_preference(
-        &mut self,
-        name: &str,
-        value: &String,
-    ) -> Result<(), PreferenceDecodeError> {
+    fn update_preference(&mut self, name: &str, value: &str) -> Result<(), PreferenceDecodeError> {
         const MAP_BAN_PREF_NAME: &str = "map_ban_";
-        if name.starts_with(MAP_BAN_PREF_NAME) {
-            let slot_index_str = &name[MAP_BAN_PREF_NAME.len()..];
-            let slot_index = usize::from_str_radix(slot_index_str, 10)
+        if let Some(slot_index_str) = name.strip_prefix(MAP_BAN_PREF_NAME) {
+            let slot_index = slot_index_str
+                .parse::<usize>()
                 .map_err(|_| PreferenceDecodeError::UnknownPreference)?;
 
             if slot_index >= self.map_bans.len() {
                 return Err(PreferenceDecodeError::UnknownPreference);
             }
 
-            self.map_bans[slot_index] = Some(value.clone());
+            self.map_bans[slot_index] = Some(value.to_owned());
         } else {
             match name {
                 "random_crits" => {
@@ -228,11 +224,13 @@ impl QuickplaySession {
                     self.objectives = decode_enum_preference::<ObjectivesPreference>(value)?
                 }
                 "party_size" => {
-                    self.party_size = u8::from_str_radix(&value, 10)
+                    self.party_size = value
+                        .parse::<u8>()
                         .map_err(|_| PreferenceDecodeError::UnparseableValue)?
                 }
                 "ping_preference" => {
-                    let ping_preference = u8::from_str_radix(&value, 10)
+                    let ping_preference = value
+                        .parse::<u8>()
                         .map_err(|_| PreferenceDecodeError::InvalidValue)?;
 
                     if f32::from(ping_preference) < MIN_PING
@@ -355,16 +353,14 @@ impl QuickplaySession {
             return false;
         }
 
-        for banned_map in &self.map_bans {
-            if let Some(banned_map) = banned_map {
-                if server.map == *banned_map {
-                    trace!(
-                        "filtered server: {:?}, due to banned map {}",
-                        server,
-                        banned_map
-                    );
-                    return false;
-                }
+        for banned_map in self.map_bans.iter().flatten() {
+            if server.map == *banned_map {
+                trace!(
+                    "filtered server: {:?}, due to banned map {}",
+                    server,
+                    banned_map
+                );
+                return false;
             }
         }
 
@@ -441,7 +437,7 @@ impl QuickplaySession {
         const SCORE_FULLER: f32 = 0.2;
 
         if f32::from(new_player_count) <= count_low {
-            return lerp(0.0, count_low, 0.0, SCORE_LOW, new_player_count.into());
+            lerp(0.0, count_low, 0.0, SCORE_LOW, new_player_count.into())
         } else if f32::from(new_player_count) <= count_ideal {
             return lerp(
                 count_low,
@@ -473,8 +469,9 @@ impl QuickplaySession {
 fn decode_enum_preference<P: TryFromPrimitive<Primitive = u8>>(
     value: &str,
 ) -> Result<P, PreferenceDecodeError> {
-    let value =
-        u8::from_str_radix(value, 10).map_err(|_| PreferenceDecodeError::UnparseableValue)?;
+    let value = value
+        .parse::<u8>()
+        .map_err(|_| PreferenceDecodeError::UnparseableValue)?;
 
     P::try_from_primitive(value).map_err(|_| PreferenceDecodeError::InvalidValue)
 }
