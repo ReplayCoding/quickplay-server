@@ -81,15 +81,36 @@ mod tests {
 
     #[test]
     fn test_varint32() {
+        let numbers: &[(u32, &'static [u8])] = &[
+            (0x00, &[0x00]),
+            (0x01, &[0x01]),
+            (0x7F, &[0x7F]),
+            (0x3FFF, &[0xFF, 0x7F]),
+            (0x1F_FFFF, &[0xFF, 0xFF, 0x7F]),
+            (0xFFF_FFFF, &[0xFF, 0xFF, 0xFF, 0x7F]),
+            (u32::MAX, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]),
+        ];
+
+        for (expected, bytes) in numbers {
+            let mut reader = BitReader::endian(Cursor::new(bytes), LittleEndian);
+            assert_eq!(super::read_varint32(&mut reader).unwrap(), *expected);
+        }
+
+        // excess bytes should be ignored
+        let mut reader = BitReader::endian(
+            Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x41]),
+            LittleEndian,
+        );
+        assert_eq!(super::read_varint32(&mut reader).unwrap(), 0xFFFF_FFFF);
+
         let mut bytes: Vec<u8> = vec![];
-        for i in (0..u32::MAX).step_by(8192) {
+        for (number, expected) in numbers {
             bytes.clear();
 
             let mut writer = BitWriter::endian(Cursor::new(&mut bytes), LittleEndian);
-            super::write_varint32(&mut writer, i).unwrap();
+            super::write_varint32(&mut writer, *number).unwrap();
 
-            let mut reader = BitReader::endian(Cursor::new(&bytes), LittleEndian);
-            assert_eq!(super::read_varint32(&mut reader).unwrap(), i);
+            assert_eq!(*expected, bytes);
         }
     }
 }
