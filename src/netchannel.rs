@@ -801,7 +801,7 @@ fn calculate_checksum(bytes: &[u8]) -> u16 {
 }
 
 #[test]
-fn test_netchannels() {
+fn test_netchannels_unreliable() {
     let configuration = Box::leak(Box::new(Configuration::load_default()));
 
     let mut server_channel = NetChannel::new(0, configuration);
@@ -810,9 +810,34 @@ fn test_netchannels() {
     let messages = [Message::Print(crate::message::MessagePrint {
         text: "0".to_string(),
     })];
-
     let packet = client_channel.create_send_packet(&messages).unwrap();
     let recieved_messages = server_channel.process_packet(&packet).unwrap();
+    assert_eq!(recieved_messages, messages);
 
+    let messages = [Message::Print(crate::message::MessagePrint {
+        text: "1".to_string(),
+    })];
+    let out_of_order_packet = client_channel.create_send_packet(&messages).unwrap();
+
+    // out-of-order messages should not stop newer messages from being sent and received
+    let messages = [Message::Print(crate::message::MessagePrint {
+        text: "2".to_string(),
+    })];
+    let packet = client_channel.create_send_packet(&messages).unwrap();
+    let recieved_messages = server_channel.process_packet(&packet).unwrap();
+    assert_eq!(recieved_messages, messages);
+
+    // this should be dropped when received
+    assert!(
+        server_channel.process_packet(&out_of_order_packet).is_err(),
+        "Out-of-order packets should not be processed"
+    );
+
+    // dropped packets should not stop newer messages from being sent and received
+    let messages = [Message::Print(crate::message::MessagePrint {
+        text: "3".to_string(),
+    })];
+    let packet = client_channel.create_send_packet(&messages).unwrap();
+    let recieved_messages = server_channel.process_packet(&packet).unwrap();
     assert_eq!(recieved_messages, messages);
 }
