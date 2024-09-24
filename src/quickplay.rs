@@ -414,53 +414,57 @@ impl QuickplaySession {
     }
 
     fn score_server_by_players(players: u8, max_players: u8, party_size: u8) -> f32 {
-        let new_player_count = u16::from(players) + u16::from(party_size);
+        // Convert everything to f32 to make calculations easier
+        let (players, max_players, party_size): (f32, f32, f32) =
+            (players.into(), max_players.into(), party_size.into());
 
-        if (new_player_count + SERVER_HEADROOM) > max_players.into() {
+        let new_player_count = players + party_size;
+
+        if (new_player_count + f32::from(SERVER_HEADROOM)) > max_players {
             return -100.0;
         }
 
-        let mut new_max_players = u16::from(max_players);
-        if u16::from(max_players) > FULL_PLAYERS {
-            new_max_players = u16::from(max_players) - FULL_PLAYERS;
+        let mut new_max_players = max_players;
+        if max_players > FULL_PLAYERS.into() {
+            new_max_players = max_players - f32::from(FULL_PLAYERS);
         }
 
-        if players == 0 {
+        if players == 0.0 {
             return -0.3;
         }
 
-        let count_low = to_nearest_even(f32::from(max_players) / 3.0);
-        let count_ideal = to_nearest_even(f32::from(max_players) * 0.72);
+        let count_low = to_nearest_even(max_players / 3.0);
+        let count_ideal = to_nearest_even(max_players * 0.72);
 
         const SCORE_LOW: f32 = 0.1;
         const SCORE_IDEAL: f32 = 1.6;
         const SCORE_FULLER: f32 = 0.2;
 
-        if f32::from(new_player_count) <= count_low {
-            lerp(0.0, count_low, 0.0, SCORE_LOW, new_player_count.into())
-        } else if f32::from(new_player_count) <= count_ideal {
+        if new_player_count <= count_low {
+            lerp(0.0, count_low, 0.0, SCORE_LOW, new_player_count)
+        } else if new_player_count <= count_ideal {
             return lerp(
                 count_low,
                 count_ideal,
                 SCORE_LOW,
                 SCORE_IDEAL,
-                new_player_count.into(),
+                new_player_count,
             );
         } else if new_player_count <= new_max_players {
             return lerp(
                 count_ideal,
-                new_max_players.into(),
+                new_max_players,
                 SCORE_IDEAL,
                 SCORE_FULLER,
-                new_player_count.into(),
+                new_player_count,
             );
         } else {
             return lerp(
-                new_max_players.into(),
-                max_players.into(),
+                new_max_players,
+                max_players,
                 SCORE_FULLER,
                 SCORE_LOW,
-                new_player_count.into(),
+                new_player_count,
             );
         }
     }
