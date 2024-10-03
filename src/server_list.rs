@@ -1,18 +1,12 @@
-use std::{net::SocketAddr, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
 
 use bitflags::bitflags;
 use serde::Deserialize;
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tokio_util::sync::{CancellationToken, DropGuard};
-use tracing::{error, info};
+use tracing::{debug, error};
 
-// PLACEHOLDER HACK
-const SERVER_LIST_PATH: &str = "/home/user/servers.json";
-
-#[derive(Deserialize, Debug)]
-struct ServerListJson {
-    servers: Vec<ServerInfoJson>,
-}
+use crate::configuration::Configuration;
 
 #[derive(Deserialize, Debug)]
 struct ServerInfoJson {
@@ -62,7 +56,7 @@ pub struct ServerListController {
 }
 
 impl ServerListController {
-    pub fn new() -> Self {
+    pub fn new(configuration: &'static Configuration) -> Self {
         let cancel_token = CancellationToken::new();
         let child_token = cancel_token.child_token();
 
@@ -71,7 +65,11 @@ impl ServerListController {
             _cancel_guard: cancel_token.drop_guard(),
         };
 
-        tokio::spawn(Self::run_background(self_.servers.clone(), child_token));
+        tokio::spawn(Self::run_background(
+            self_.servers.clone(),
+            configuration,
+            child_token,
+        ));
 
         self_
     }
@@ -82,32 +80,35 @@ impl ServerListController {
 
     async fn run_background(
         servers: Arc<RwLock<Vec<ServerInfo>>>,
+        configuration: &'static Configuration,
         _cancel_token: CancellationToken,
     ) {
-        // HACK TODO terrible testing code, replace me
-        match std::fs::read(SERVER_LIST_PATH) {
-            Ok(server_list_data) => match load_server_infos_from_json(&server_list_data) {
-                Ok(server_list) => {
-                    let mut l = servers.write().await;
-                    *l = server_list;
+        while !_cancel_token.is_cancelled() {
+            match std::fs::read(&configuration.quickplay.server_list_path) {
+                Ok(server_list_data) => match load_server_infos_from_json(&server_list_data) {
+                    Ok(server_list) => {
+                        let mut l = servers.write().await;
+                        *l = server_list;
 
-                    info!("loaded server list from file: {} servers total", l.len());
-                }
+                        debug!("loaded server list from file: {} servers total", l.len());
+                    }
+                    Err(e) => {
+                        error!("error while parsing server list: {}", e);
+                    }
+                },
                 Err(e) => {
-                    error!("error while parsing server list: {}", e);
+                    error!("error while loading server list from file: {}", e);
                 }
-            },
-            Err(e) => {
-                error!("error while loading server list from file: {}", e);
             }
+
+            tokio::time::sleep(Duration::from_secs(10)).await;
         }
     }
 }
 
 fn load_server_infos_from_json(data: &[u8]) -> anyhow::Result<Vec<ServerInfo>> {
-    let raw_servers: ServerListJson = serde_json::from_slice(data)?;
+    let raw_servers: Vec<ServerInfoJson> = serde_json::from_slice(data)?;
     let parsed_servers = raw_servers
-        .servers
         .into_iter()
         .map(|raw_server| {
             Ok(ServerInfo {

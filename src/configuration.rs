@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 pub struct QuickplayConfiguration {
     /// the prefix that all user preferences will start with
     pub preference_convar_prefix: String,
+    /// the path to the server list
+    pub server_list_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -63,6 +65,7 @@ impl Configuration {
             },
             quickplay: QuickplayConfiguration {
                 preference_convar_prefix: "rqp_".to_string(),
+                server_list_path: "/invalid/path.json".to_string(),
             },
         }
     }
