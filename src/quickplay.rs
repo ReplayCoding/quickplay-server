@@ -67,8 +67,8 @@ const FULL_PLAYERS: u16 = 24;
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u8)]
 enum RandomCritsPreference {
-    Enabled = 0,
-    Disabled,
+    Disabled = 0,
+    Enabled,
     DontCare,
 }
 
@@ -83,8 +83,8 @@ enum RespawnTimesPreference {
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u8)]
 enum RtdPreference {
-    Enabled = 0,
-    Disabled,
+    Disabled = 0,
+    Enabled,
     DontCare,
 }
 
@@ -99,8 +99,8 @@ enum ClassRestrictionsPreference {
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u8)]
 enum ObjectivesPreference {
-    Enabled = 0,
-    Disabled,
+    Disabled = 0,
+    Enabled,
     DontCare,
 }
 
