@@ -47,7 +47,7 @@ pub struct ServerInfo {
     pub tags: ServerTags,
 
     pub score: f32,
-    pub ping: f32,
+    pub _ping: f32,
 }
 
 pub struct ServerListController {
@@ -118,7 +118,7 @@ fn load_server_infos_from_json(data: &[u8]) -> anyhow::Result<Vec<ServerInfo>> {
                 map: raw_server.map,
                 tags: string_tags_to_flags(&raw_server.gametype),
                 score: raw_server.score,
-                ping: raw_server.ping,
+                _ping: raw_server.ping,
             })
         })
         .collect::<anyhow::Result<Vec<ServerInfo>>>()?;

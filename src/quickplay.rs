@@ -49,18 +49,6 @@ use crate::{
 // Maybe move this to config?
 const MAX_MAP_BANS: usize = 6;
 
-const PING_LOW_SCORE: f32 = 0.9;
-const PING_MIN: f32 = 24.0;
-
-const PING_MED: f32 = 150.0;
-const PING_MED_SCORE: f32 = 0.0;
-
-const PING_HIGH: f32 = 300.0;
-const PING_HIGH_SCORE: f32 = -1.0;
-
-const MIN_PING: f32 = PING_MIN + 1.0;
-const MAX_PING: f32 = PING_MED - 1.0;
-
 const SERVER_HEADROOM: u16 = 1;
 const FULL_PLAYERS: u16 = 24;
 
@@ -108,7 +96,6 @@ enum PreferenceDecodeError {
     UnparseableValue = 0,
     InvalidValue,
     UnknownPreference,
-    PingPreferenceNotInRange,
 }
 
 bitflags! {
@@ -127,7 +114,6 @@ bitflags! {
 
 #[derive(Debug)]
 pub struct QuickplaySession {
-    // server_capacity: ...,
     random_crits: RandomCritsPreference,
     respawn_times: RespawnTimesPreference,
     rtd: RtdPreference,
@@ -135,7 +121,6 @@ pub struct QuickplaySession {
     class_restrictions: ClassRestrictionsPreference,
     objectives: ObjectivesPreference,
 
-    ping_preference: u8,
     party_size: u8,
 
     map_bans: [Option<String>; MAX_MAP_BANS],
@@ -147,13 +132,11 @@ pub struct QuickplaySession {
 impl QuickplaySession {
     pub fn new(configuration: &'static Configuration) -> Self {
         Self {
-            // server_capacity: todo!(),
             random_crits: RandomCritsPreference::DontCare,
             respawn_times: RespawnTimesPreference::Default,
             rtd: RtdPreference::Disabled,
             class_restrictions: ClassRestrictionsPreference::None,
             objectives: ObjectivesPreference::Enabled,
-            ping_preference: 50,
             party_size: 1,
             map_bans: std::array::from_fn(|_| None),
             // Everything except for alternative and arena
@@ -183,10 +166,6 @@ impl QuickplaySession {
                         PreferenceDecodeError::UnknownPreference => {
                             format!("Unknown preference \"{name}\"")
                         }
-                        PreferenceDecodeError::PingPreferenceNotInRange => format!(
-                            "Ping preference {value} not within range, minimum {}, maximum {}",
-                            MIN_PING, MAX_PING,
-                        ),
                     });
                 };
             }
@@ -227,19 +206,6 @@ impl QuickplaySession {
                     self.party_size = value
                         .parse::<u8>()
                         .map_err(|_| PreferenceDecodeError::UnparseableValue)?
-                }
-                "ping_preference" => {
-                    let ping_preference = value
-                        .parse::<u8>()
-                        .map_err(|_| PreferenceDecodeError::InvalidValue)?;
-
-                    if f32::from(ping_preference) < MIN_PING
-                        || f32::from(ping_preference) > MAX_PING
-                    {
-                        return Err(PreferenceDecodeError::PingPreferenceNotInRange);
-                    }
-
-                    self.ping_preference = ping_preference;
                 }
                 _ => return Err(PreferenceDecodeError::UnknownPreference),
             }
@@ -371,32 +337,11 @@ impl QuickplaySession {
         server.score + self.score_server_for_user(server) + self.score_server(server)
     }
 
-    fn score_server_for_user(&self, server: &ServerInfo) -> f32 {
+    fn score_server_for_user(&self, _server: &ServerInfo) -> f32 {
         // TODO: recalculate ping based on user location
-        let mut score: f32 = 0.0;
-        let ping = server.ping;
-
-        if ping <= PING_MIN {
-            score += 1.0;
-        } else if ping < self.ping_preference.into() {
-            score += lerp(
-                PING_MIN,
-                self.ping_preference.into(),
-                1.0,
-                PING_LOW_SCORE,
-                ping,
-            );
-        } else if ping < PING_MED {
-            score += lerp(
-                self.ping_preference.into(),
-                PING_MED,
-                PING_LOW_SCORE,
-                PING_MED_SCORE,
-                ping,
-            );
-        } else {
-            score += lerp(PING_MED, PING_HIGH, PING_MED_SCORE, PING_HIGH_SCORE, ping);
-        }
+        // TODO: since this isn't getting the real ping, no point in having it around
+        // TODO: score servers by user ping
+        let score: f32 = 0.0;
 
         score
     }
