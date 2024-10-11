@@ -151,6 +151,13 @@ impl QuickplaySession {
         convars: &[(String, String)],
     ) -> Result<(), String> {
         for (name, value) in convars {
+            // source doesn't let you undefine convars made with setinfo. as a
+            // workaround, if the user makes the value an empty string it will
+            // be treated as if it doesn't exist.
+            if value.is_empty() {
+                continue;
+            }
+
             let prefix = &self.configuration.quickplay.preference_convar_prefix;
 
             if name.starts_with(prefix) {
