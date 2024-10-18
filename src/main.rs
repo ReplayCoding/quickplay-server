@@ -4,7 +4,6 @@ mod io_util;
 mod message;
 mod netchannel;
 mod quickplay;
-mod server_list;
 
 use std::{
     borrow::Cow,
@@ -21,8 +20,8 @@ use argh::FromArgs;
 use configuration::Configuration;
 use message::{Message, MessageDisconnect, MessageStringCmd};
 use netchannel::NetChannel;
-use quickplay::QuickplaySession;
-use server_list::ServerListController;
+use quickplay::global::QuickplayGlobal;
+use quickplay::session::QuickplaySession;
 use tokio::{
     net::UdpSocket,
     sync::{Mutex, RwLock},
@@ -48,7 +47,6 @@ struct Connection {
     _cancel_guard: DropGuard,
 
     quickplay: QuickplaySession,
-    server_list: Arc<ServerListController>,
 }
 
 impl Connection {
@@ -56,7 +54,7 @@ impl Connection {
         socket: Arc<UdpSocket>,
         client_addr: SocketAddr,
         netchan: NetChannel,
-        server_list: Arc<ServerListController>,
+        quickplay: Arc<QuickplayGlobal>,
         configuration: &'static Configuration,
     ) -> Self {
         let netchan = Arc::new(Mutex::new(netchan));
@@ -80,8 +78,7 @@ impl Connection {
             marked_for_death: false,
             _cancel_guard: cancel_token.drop_guard(),
 
-            quickplay: QuickplaySession::new(configuration),
-            server_list,
+            quickplay: QuickplaySession::new(quickplay, configuration),
         }
     }
 
@@ -98,20 +95,17 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    let server_list = self.server_list.list().await;
-
                     let start = Instant::now();
-                    let message = if let Some(destination_server) =
-                        { self.quickplay.find_server(&server_list) }
-                    {
-                        Message::StringCmd(MessageStringCmd {
-                            command: format!("redirect {}", destination_server),
-                        })
-                    } else {
-                        Message::Disconnect(MessageDisconnect {
-                            reason: "No matches found with selected filter".to_string(),
-                        })
-                    };
+                    let message =
+                        if let Some(destination_server) = { self.quickplay.find_server().await } {
+                            Message::StringCmd(MessageStringCmd {
+                                command: format!("redirect {}", destination_server),
+                            })
+                        } else {
+                            Message::Disconnect(MessageDisconnect {
+                                reason: "No matches found with selected filter".to_string(),
+                            })
+                        };
                     trace!("quickplay search took {:?}", start.elapsed());
 
                     self.netchan
@@ -210,7 +204,7 @@ struct Server {
     socket: Arc<UdpSocket>,
     _cancel_guard: DropGuard,
 
-    server_list: Arc<ServerListController>,
+    quickplay: Arc<QuickplayGlobal>,
 
     configuration: &'static Configuration,
 }
@@ -231,7 +225,7 @@ impl Server {
             connections,
             socket: socket.into(),
             _cancel_guard: cancel_token.drop_guard(),
-            server_list: Arc::new(ServerListController::new(configuration)),
+            quickplay: Arc::new(QuickplayGlobal::new(configuration)),
 
             configuration,
         };
@@ -302,7 +296,7 @@ impl Server {
                     self.socket.clone(),
                     from,
                     NetChannel::new(challenge, self.configuration),
-                    self.server_list.clone(),
+                    self.quickplay.clone(),
                     self.configuration,
                 );
                 debug!("created netchannel for client {:?}", from);

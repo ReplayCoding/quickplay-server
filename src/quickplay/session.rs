@@ -35,7 +35,7 @@
 //             8 gamemodes
 //         9 (?) single var + 6 map bans + 8 gamemodes = 23 total, way under
 
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
 use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
@@ -43,7 +43,7 @@ use tracing::trace;
 
 use crate::{
     configuration::Configuration,
-    server_list::{ServerInfo, ServerTags},
+    quickplay::global::{QuickplayGlobal, ServerInfo, ServerTags},
 };
 
 // Maybe move this to config?
@@ -113,7 +113,7 @@ bitflags! {
 }
 
 #[derive(Debug)]
-pub struct QuickplaySession {
+struct QuickplayPreferences {
     random_crits: RandomCritsPreference,
     respawn_times: RespawnTimesPreference,
     rtd: RtdPreference,
@@ -125,62 +125,9 @@ pub struct QuickplaySession {
 
     map_bans: [Option<String>; MAX_MAP_BANS],
     _gamemodes: Gamemodes,
-
-    configuration: &'static Configuration,
 }
 
-impl QuickplaySession {
-    pub fn new(configuration: &'static Configuration) -> Self {
-        Self {
-            random_crits: RandomCritsPreference::DontCare,
-            respawn_times: RespawnTimesPreference::Default,
-            rtd: RtdPreference::Disabled,
-            class_restrictions: ClassRestrictionsPreference::None,
-            objectives: ObjectivesPreference::Enabled,
-            party_size: 1,
-            map_bans: std::array::from_fn(|_| None),
-            // Everything except for alternative and arena
-            _gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
-
-            configuration,
-        }
-    }
-
-    pub fn update_preferences_from_convars(
-        &mut self,
-        convars: &[(String, String)],
-    ) -> Result<(), String> {
-        for (name, value) in convars {
-            // source doesn't let you undefine convars made with setinfo. as a
-            // workaround, if the user makes the value an empty string it will
-            // be treated as if it doesn't exist.
-            if value.is_empty() {
-                continue;
-            }
-
-            let prefix = &self.configuration.quickplay.preference_convar_prefix;
-
-            if name.starts_with(prefix) {
-                let name = &name[prefix.len()..];
-                if let Err(err_type) = self.update_preference(name, value) {
-                    return Err(match err_type {
-                        PreferenceDecodeError::UnparseableValue => {
-                            format!("Could not decode value for preference \"{name}\": \"{value}\"")
-                        }
-                        PreferenceDecodeError::InvalidValue => {
-                            format!("Invalid value for preference \"{name}\": \"{value}\"")
-                        }
-                        PreferenceDecodeError::UnknownPreference => {
-                            format!("Unknown preference \"{name}\"")
-                        }
-                    });
-                };
-            }
-        }
-
-        Ok(())
-    }
-
+impl QuickplayPreferences {
     fn update_preference(&mut self, name: &str, value: &str) -> Result<(), PreferenceDecodeError> {
         const MAP_BAN_PREF_NAME: &str = "map_ban_";
         if let Some(slot_index_str) = name.strip_prefix(MAP_BAN_PREF_NAME) {
@@ -219,40 +166,6 @@ impl QuickplaySession {
         };
 
         Ok(())
-    }
-
-    pub fn find_server(&self, server_list: &[ServerInfo]) -> Option<SocketAddr> {
-        trace!("preferences are {:#?}", self);
-
-        let (must_match_tags, must_not_match_tags) = self.build_filter_tags();
-
-        let mut best_server: Option<(&ServerInfo, f32)> = None;
-
-        for server in server_list {
-            if !self.filter_server(server, must_match_tags, must_not_match_tags) {
-                continue;
-            }
-
-            let current_server_score = self.recalculate_server_score(server);
-            if current_server_score <= 1.0 {
-                trace!(
-                    "filtered server: {:?}, due to bad score {}",
-                    server,
-                    current_server_score
-                );
-                continue;
-            }
-
-            if let Some((_, best_server_score)) = best_server {
-                if current_server_score > best_server_score {
-                    best_server = Some((server, current_server_score));
-                }
-            } else {
-                best_server = Some((server, current_server_score));
-            }
-        }
-
-        best_server.map(|(s, _)| s.addr)
     }
 
     fn build_filter_tags(&self) -> (ServerTags, ServerTags) {
@@ -296,6 +209,110 @@ impl QuickplaySession {
 
         (must_match_tags, must_not_match_tags)
     }
+}
+
+impl Default for QuickplayPreferences {
+    fn default() -> Self {
+        Self {
+            random_crits: RandomCritsPreference::DontCare,
+            respawn_times: RespawnTimesPreference::Default,
+            rtd: RtdPreference::Disabled,
+            class_restrictions: ClassRestrictionsPreference::None,
+            objectives: ObjectivesPreference::Enabled,
+            party_size: 1,
+            map_bans: std::array::from_fn(|_| None),
+            // Everything except for alternative and arena
+            _gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
+        }
+    }
+}
+
+pub struct QuickplaySession {
+    preferences: QuickplayPreferences,
+
+    global: Arc<QuickplayGlobal>,
+    configuration: &'static Configuration,
+}
+
+impl QuickplaySession {
+    pub fn new(global: Arc<QuickplayGlobal>, configuration: &'static Configuration) -> Self {
+        Self {
+            preferences: QuickplayPreferences::default(),
+
+            global,
+            configuration,
+        }
+    }
+
+    pub fn update_preferences_from_convars(
+        &mut self,
+        convars: &[(String, String)],
+    ) -> Result<(), String> {
+        for (name, value) in convars {
+            // source doesn't let you undefine convars made with setinfo. as a
+            // workaround, if the user makes the value an empty string it will
+            // be treated as if it doesn't exist.
+            if value.is_empty() {
+                continue;
+            }
+
+            let prefix = &self.configuration.quickplay.preference_convar_prefix;
+
+            if name.starts_with(prefix) {
+                let name = &name[prefix.len()..];
+                if let Err(err_type) = self.preferences.update_preference(name, value) {
+                    return Err(match err_type {
+                        PreferenceDecodeError::UnparseableValue => {
+                            format!("Could not decode value for preference \"{name}\": \"{value}\"")
+                        }
+                        PreferenceDecodeError::InvalidValue => {
+                            format!("Invalid value for preference \"{name}\": \"{value}\"")
+                        }
+                        PreferenceDecodeError::UnknownPreference => {
+                            format!("Unknown preference \"{name}\"")
+                        }
+                    });
+                };
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn find_server(&self) -> Option<SocketAddr> {
+        trace!("preferences are {:#?}", self.preferences);
+
+        let (must_match_tags, must_not_match_tags) = self.preferences.build_filter_tags();
+
+        let mut best_server: Option<(&ServerInfo, f32)> = None;
+
+        let server_list = self.global.server_list().await;
+        for server in server_list.iter() {
+            if !self.filter_server(server, must_match_tags, must_not_match_tags) {
+                continue;
+            }
+
+            let current_server_score = self.recalculate_server_score(server);
+            if current_server_score <= 1.0 {
+                trace!(
+                    "filtered server: {:?}, due to bad score {}",
+                    server,
+                    current_server_score
+                );
+                continue;
+            }
+
+            if let Some((_, best_server_score)) = best_server {
+                if current_server_score > best_server_score {
+                    best_server = Some((server, current_server_score));
+                }
+            } else {
+                best_server = Some((server, current_server_score));
+            }
+        }
+
+        best_server.map(|(s, _)| s.addr)
+    }
 
     fn filter_server(
         &self,
@@ -326,7 +343,7 @@ impl QuickplaySession {
             return false;
         }
 
-        for banned_map in self.map_bans.iter().flatten() {
+        for banned_map in self.preferences.map_bans.iter().flatten() {
             if server.map == *banned_map {
                 trace!(
                     "filtered server: {:?}, due to banned map {}",
@@ -354,13 +371,16 @@ impl QuickplaySession {
     }
 
     fn score_server(&self, server: &ServerInfo) -> f32 {
-        if self.party_size <= 1 {
+        if self.preferences.party_size <= 1 {
             return 0.0;
         }
 
         let default_score = Self::score_server_by_players(server.players, server.max_players, 1);
-        let new_score =
-            Self::score_server_by_players(server.players, server.max_players, self.party_size);
+        let new_score = Self::score_server_by_players(
+            server.players,
+            server.max_players,
+            self.preferences.party_size,
+        );
 
         new_score - default_score
     }

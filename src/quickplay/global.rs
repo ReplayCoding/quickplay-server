@@ -50,12 +50,12 @@ pub struct ServerInfo {
     pub _ping: f32,
 }
 
-pub struct ServerListController {
+pub struct QuickplayGlobal {
     servers: Arc<RwLock<Vec<ServerInfo>>>,
     _cancel_guard: DropGuard,
 }
 
-impl ServerListController {
+impl QuickplayGlobal {
     pub fn new(configuration: &'static Configuration) -> Self {
         let cancel_token = CancellationToken::new();
         let child_token = cancel_token.child_token();
@@ -74,7 +74,7 @@ impl ServerListController {
         self_
     }
 
-    pub async fn list(&self) -> RwLockReadGuard<Vec<ServerInfo>> {
+    pub async fn server_list(&self) -> RwLockReadGuard<Vec<ServerInfo>> {
         self.servers.read().await
     }
 
