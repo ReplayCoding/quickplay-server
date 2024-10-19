@@ -95,7 +95,6 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    let start = Instant::now();
                     let message =
                         if let Some(destination_server) = { self.quickplay.find_server().await } {
                             Message::StringCmd(MessageStringCmd {
@@ -106,7 +105,6 @@ impl Connection {
                                 reason: "No matches found with selected filter".to_string(),
                             })
                         };
-                    trace!("quickplay search took {:?}", start.elapsed());
 
                     self.netchan
                         .lock()

@@ -8,6 +8,8 @@ pub struct QuickplayConfiguration {
     pub preference_convar_prefix: String,
     /// the path to the server list
     pub server_list_path: String,
+    /// the path to the schema
+    pub schema_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -66,6 +68,7 @@ impl Configuration {
             quickplay: QuickplayConfiguration {
                 preference_convar_prefix: "rqp_".to_string(),
                 server_list_path: "/invalid/path.json".to_string(),
+                schema_path: "/invalid/path.json".to_string(),
             },
         }
     }

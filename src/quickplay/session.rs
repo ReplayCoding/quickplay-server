@@ -37,13 +37,12 @@
 
 use std::{net::SocketAddr, sync::Arc};
 
-use bitflags::bitflags;
 use num_enum::TryFromPrimitive;
 use tracing::trace;
 
 use crate::{
     configuration::Configuration,
-    quickplay::global::{QuickplayGlobal, ServerInfo, ServerTags},
+    quickplay::global::{Gamemodes, QuickplayGlobal, ServerInfo, ServerTags},
 };
 
 // Maybe move this to config?
@@ -98,20 +97,6 @@ enum PreferenceDecodeError {
     UnknownPreference,
 }
 
-bitflags! {
-    #[derive(Debug)]
-    struct Gamemodes: u8 {
-        const PAYLOAD        = 1 << 0;
-        const KOTH           = 1 << 1;
-        const ATTACK_DEFENSE = 1 << 2;
-        const CTF            = 1 << 3;
-        const CAPTURE_POINT  = 1 << 4;
-        const PAYLOAD_RACE   = 1 << 5;
-        const ALTERNATIVE    = 1 << 6;
-        const ARENA          = 1 << 7;
-    }
-}
-
 #[derive(Debug)]
 struct QuickplayPreferences {
     random_crits: RandomCritsPreference,
@@ -124,12 +109,13 @@ struct QuickplayPreferences {
     party_size: u8,
 
     map_bans: [Option<String>; MAX_MAP_BANS],
-    _gamemodes: Gamemodes,
+    gamemodes: Gamemodes,
 }
 
 impl QuickplayPreferences {
     fn update_preference(&mut self, name: &str, value: &str) -> Result<(), PreferenceDecodeError> {
         const MAP_BAN_PREF_NAME: &str = "map_ban_";
+        const GAMEMODE_PREF_NAME: &str = "gamemode_";
         if let Some(slot_index_str) = name.strip_prefix(MAP_BAN_PREF_NAME) {
             let slot_index = slot_index_str
                 .parse::<usize>()
@@ -140,6 +126,15 @@ impl QuickplayPreferences {
             }
 
             self.map_bans[slot_index] = Some(value.to_owned());
+        } else if let Some(gamemode) = name.strip_prefix(GAMEMODE_PREF_NAME) {
+            let gamemode =
+                Gamemodes::from_str(gamemode).ok_or(PreferenceDecodeError::UnknownPreference)?;
+
+            match value {
+                "0" => self.gamemodes &= !gamemode,
+                "1" => self.gamemodes |= gamemode,
+                _ => return Err(PreferenceDecodeError::InvalidValue),
+            }
         } else {
             match name {
                 "random_crits" => {
@@ -222,7 +217,7 @@ impl Default for QuickplayPreferences {
             party_size: 1,
             map_bans: std::array::from_fn(|_| None),
             // Everything except for alternative and arena
-            _gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
+            gamemodes: Gamemodes::all() ^ (Gamemodes::ALTERNATIVE | Gamemodes::ARENA),
         }
     }
 }
@@ -287,6 +282,8 @@ impl QuickplaySession {
         let mut best_server: Option<(&ServerInfo, f32)> = None;
 
         let server_list = self.global.server_list().await;
+
+        let start = std::time::Instant::now();
         for server in server_list.iter() {
             if !self.filter_server(server, must_match_tags, must_not_match_tags) {
                 continue;
@@ -310,6 +307,7 @@ impl QuickplaySession {
                 best_server = Some((server, current_server_score));
             }
         }
+        trace!("quickplay search took {:?}", start.elapsed());
 
         best_server.map(|(s, _)| s.addr)
     }
@@ -321,8 +319,16 @@ impl QuickplaySession {
         must_not_match_tags: ServerTags,
     ) -> bool {
         // TODO: filter by player count
-        // TODO: filter by gamemodes
         // TODO: server bans?
+
+        if self.preferences.gamemodes & server.gamemode != server.gamemode {
+            trace!(
+                "filtered server: {:?}, due to gamemode not matching preferences {:?}",
+                server,
+                self.preferences.gamemodes
+            );
+            return false;
+        }
 
         if (server.tags & must_match_tags) != must_match_tags {
             trace!(
