@@ -368,6 +368,13 @@ impl NetChannel {
         for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
             let mut stream_completed = false;
             if let Some(stream) = streams.front() {
+                trace!(
+                    "stream {} completion: acked {} / total {}",
+                    streams_idx,
+                    stream.acked_fragments,
+                    stream.total_fragments()
+                );
+
                 if stream.acked_fragments == stream.total_fragments() {
                     stream_completed = true;
                 }
@@ -670,11 +677,15 @@ impl NetChannel {
                         writer.write_bit(false)?;
 
                         write_varint32(writer, stream.total_bytes())?;
+                        trace!("writing reliable single block length {length}");
                     } else {
+                        let start_fragment = subchannel.start_fragment[streams_idx];
+                        let num_fragments = subchannel.num_fragments[streams_idx];
+
                         writer.write_out::<{ MAX_FILE_SIZE_BITS - FRAGMENT_BITS }, _>(
-                            subchannel.start_fragment[streams_idx],
+                            start_fragment,
                         )?;
-                        writer.write_out::<3, _>(subchannel.num_fragments[streams_idx])?;
+                        writer.write_out::<3, _>(num_fragments)?;
 
                         if offset == 0 {
                             // TODO: handle file transfers, this will require a bit more work though
@@ -687,6 +698,7 @@ impl NetChannel {
 
                             writer.write_out::<MAX_FILE_SIZE_BITS, _>(stream.total_bytes())?;
                         }
+                        trace!("writing reliable multi block length {length} start {start_fragment} count {num_fragments}",);
                     }
 
                     let offset = usize::try_from(offset)?;
@@ -731,7 +743,7 @@ impl NetChannel {
                     if sent_fragments == stream.total_fragments() {
                         // No data left to send
                         continue;
-                    };
+                    }
 
                     // number of fragments we'll send in this packet
                     let num_fragments: u32 =
@@ -834,6 +846,80 @@ fn test_netchannels_unreliable() {
         text: "3".to_string(),
     })];
     let packet = client_channel.create_send_packet(&messages).unwrap();
-    let recieved_messages = server_channel.process_packet(&packet).unwrap();
-    assert_eq!(recieved_messages, messages);
+    let received_messages = server_channel.process_packet(&packet).unwrap();
+    assert_eq!(received_messages, messages);
+}
+
+#[test]
+fn test_netchannels_reliable() {
+    let configuration = Box::leak(Box::new(Configuration::load_default()));
+
+    let mut server_channel = NetChannel::new(0, configuration);
+    let mut client_channel = NetChannel::new(0, configuration);
+
+    let mut test_reliable = |num_messages: usize, drop_every_n_packets: usize| {
+        let mut messages = vec![];
+        for i in 0..num_messages {
+            messages.push(Message::Print(crate::message::MessagePrint {
+                text: i.to_string(),
+            }));
+        }
+
+        client_channel.queue_reliable_messages(&messages).unwrap();
+
+        let mut packet_counter = 0;
+        loop {
+            packet_counter += 1;
+
+            trace!("SENDER");
+            trace!(
+                "--------------------------------------------------------------------------------"
+            );
+            let packet = client_channel.create_send_packet(&[]).unwrap();
+
+            // packets must be created by the client, but not received by the server
+            if drop_every_n_packets != 0 && packet_counter % drop_every_n_packets == 0 {
+                trace!("dropping packet");
+                continue;
+            }
+
+            trace!("RECEIVER");
+            trace!(
+                "--------------------------------------------------------------------------------"
+            );
+            let received_messages = server_channel.process_packet(&packet).unwrap();
+
+            trace!("RECEIVER - CREATE ACK");
+            trace!(
+                "--------------------------------------------------------------------------------"
+            );
+            // receiver must be able to send ack back to sender
+            let packet = server_channel.create_send_packet(&[]).unwrap();
+
+            trace!("SENDER - RECEIVE ACK");
+            trace!(
+                "--------------------------------------------------------------------------------"
+            );
+            client_channel.process_packet(&packet).unwrap();
+
+            // larger transfers should be split up into multiple chunks
+            // this will hang if the message never gets received due to a bug
+            if !received_messages.is_empty() {
+                assert_eq!(received_messages, messages);
+                break;
+            }
+        }
+    };
+
+    test_reliable(1, 0);
+
+    // make sure that multiple transfers can be sent/received in one session
+    test_reliable(5000, 0);
+
+    // reliable messages must be delivered even when packets are dropped this
+    // hangs if every other message is dropped (5000, 2), because every message
+    // that contains a reliable payload will be dropped due to the way the
+    // testing function is implemented. in practice this shouldn't be an issue,
+    // as an unreliable link won't drop exactly every other message.
+    test_reliable(5000, 3);
 }
