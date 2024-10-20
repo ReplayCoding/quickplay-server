@@ -6,13 +6,8 @@ mod netchannel;
 mod quickplay;
 
 use std::{
-    borrow::Cow,
-    collections::HashMap,
-    net::SocketAddr,
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-    time::{Duration, Instant},
+    borrow::Cow, collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc,
+    time::Duration,
 };
 
 use anyhow::anyhow;
@@ -24,10 +19,12 @@ use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
 use tokio::{
     net::UdpSocket,
-    sync::{Mutex, RwLock},
-    task::JoinSet,
+    sync::{
+        mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender},
+        RwLock,
+    },
 };
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
 const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
@@ -37,16 +34,15 @@ const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
 struct Connection {
-    // socket: Arc<UdpSocket>,
-    // client_addr: SocketAddr,
-    netchan: Arc<Mutex<NetChannel>>,
-
-    created_at: Instant,
-
-    marked_for_death: bool,
-    _cancel_guard: DropGuard,
+    socket: Arc<UdpSocket>,
+    client_addr: SocketAddr,
+    packet_receiver: UnboundedReceiver<Vec<u8>>,
+    netchan: NetChannel,
+    cancel_token: CancellationToken,
 
     quickplay: QuickplaySession,
+
+    configuration: &'static Configuration,
 }
 
 impl Connection {
@@ -56,39 +52,35 @@ impl Connection {
         netchan: NetChannel,
         quickplay: Arc<QuickplayGlobal>,
         configuration: &'static Configuration,
-    ) -> Self {
-        let netchan = Arc::new(Mutex::new(netchan));
+    ) -> (CancellationToken, UnboundedSender<Vec<u8>>) {
         let cancel_token = CancellationToken::new();
 
-        tokio::task::spawn(Self::send_background(
-            socket.clone(),
+        let (packet_sender, packet_receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        let self_ = Self {
+            socket,
             client_addr,
-            netchan.clone(),
-            cancel_token.child_token(),
-            configuration,
-        ));
-
-        Self {
-            // socket,
-            // client_addr,
+            packet_receiver,
             netchan,
-
-            created_at: Instant::now(),
-
-            marked_for_death: false,
-            _cancel_guard: cancel_token.drop_guard(),
+            cancel_token: cancel_token.clone(),
 
             quickplay: QuickplaySession::new(quickplay, configuration),
-        }
+
+            configuration,
+        };
+
+        tokio::task::spawn(self_.background_worker());
+
+        (cancel_token, packet_sender)
     }
 
     async fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let messages = self.netchan.lock().await.process_packet(data)?;
+        let messages = self.netchan.process_packet(data)?;
 
         for message in messages {
             trace!("got message {:?}", message);
             match message {
-                Message::Disconnect(_) => self.marked_for_death = true,
+                Message::Disconnect(_) => self.cancel_token.cancel(),
                 Message::SignonState(message) => {
                     // SIGNONSTATE_CONNECTED = 2
                     if message.signon_state != 2 {
@@ -106,21 +98,18 @@ impl Connection {
                             })
                         };
 
-                    self.netchan
-                        .lock()
-                        .await
-                        .queue_reliable_messages(&[message])?;
+                    self.netchan.queue_reliable_messages(&[message])?;
                 }
                 Message::SetConVars(message) => {
                     if let Err(error_message) = self
                         .quickplay
                         .update_preferences_from_convars(&message.convars)
                     {
-                        self.netchan.lock().await.queue_reliable_messages(&[
-                            Message::Disconnect(MessageDisconnect {
+                        self.netchan.queue_reliable_messages(&[Message::Disconnect(
+                            MessageDisconnect {
                                 reason: error_message,
-                            }),
-                        ])?;
+                            },
+                        )])?;
                     };
                 }
 
@@ -131,18 +120,26 @@ impl Connection {
         Ok(())
     }
 
-    async fn send_background(
-        socket: Arc<UdpSocket>,
-        client_addr: SocketAddr,
-        netchan: Arc<Mutex<NetChannel>>,
-        cancel_token: CancellationToken,
-        configuration: &'static Configuration,
-    ) {
-        while !cancel_token.is_cancelled() {
+    async fn background_worker(mut self) {
+        while !self.cancel_token.is_cancelled() {
+            // process any incoming packets
+            match self.packet_receiver.try_recv() {
+                Ok(packet) => {
+                    if let Err(err) = self.handle_packet(&packet).await {
+                        debug!("error occured while handling incoming packet: {err:?}");
+                    };
+                }
+
+                // If the channel gets disconnected, the task *should* have been
+                // cancelled, so just wait until the next iteration to leave the
+                // loop
+                Err(TryRecvError::Disconnected) | Err(TryRecvError::Empty) => {}
+            }
+
             // allow the netchannel to send remaining reliable data
-            match netchan.lock().await.create_send_packet(&[]) {
+            match self.netchan.create_send_packet(&[]) {
                 Ok(data) => {
-                    if let Err(err) = socket.send_to(&data, client_addr).await {
+                    if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
                         warn!("error occured while sending outgoing data: {:?}", err);
                     };
                 }
@@ -152,7 +149,7 @@ impl Connection {
             };
 
             tokio::time::sleep(Duration::from_millis(
-                configuration.server.connection_update_delay,
+                self.configuration.server.connection_update_delay,
             ))
             .await;
         }
@@ -197,10 +194,13 @@ fn decode_raw_packet(packet_data: &[u8]) -> anyhow::Result<Cow<'_, [u8]>> {
     Ok(Cow::Borrowed(packet_data))
 }
 
+type ConnectionMap =
+    Arc<RwLock<HashMap<SocketAddr, (CancellationToken, UnboundedSender<Vec<u8>>)>>>;
 struct Server {
-    connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>>,
     socket: Arc<UdpSocket>,
-    _cancel_guard: DropGuard,
+
+    connections: ConnectionMap,
+    cancel_token: CancellationToken,
 
     quickplay: Arc<QuickplayGlobal>,
 
@@ -208,21 +208,18 @@ struct Server {
 }
 
 impl Server {
-    fn new(socket: UdpSocket, configuration: &'static Configuration) -> anyhow::Result<Self> {
-        let connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>> =
-            Arc::new(HashMap::new().into());
+    async fn new(configuration: &'static Configuration) -> anyhow::Result<Self> {
+        let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
+
+        let socket = UdpSocket::bind(bind_address).await?;
+        info!("bound to address {:?}", socket.local_addr()?);
 
         let cancel_token = CancellationToken::new();
-        tokio::spawn(Self::connection_killer(
-            connections.clone(),
-            cancel_token.child_token(),
-            configuration,
-        ));
 
         let server = Self {
-            connections,
+            connections: Arc::new(HashMap::new().into()),
             socket: socket.into(),
-            _cancel_guard: cancel_token.drop_guard(),
+            cancel_token,
             quickplay: Arc::new(QuickplayGlobal::new(configuration)),
 
             configuration,
@@ -231,52 +228,7 @@ impl Server {
         Ok(server)
     }
 
-    async fn connection_killer(
-        connections: Arc<RwLock<HashMap<SocketAddr, RwLock<Connection>>>>,
-        cancel_token: CancellationToken,
-        configuration: &'static Configuration,
-    ) {
-        while !cancel_token.is_cancelled() {
-            let current_time = Instant::now();
-            let mut connections_to_kill = vec![];
-
-            for (client_addr, connection) in connections.read().await.iter() {
-                let mut connection = connection.write().await;
-
-                if current_time.duration_since(connection.created_at)
-                    > Duration::from_millis(configuration.server.connection_timeout)
-                {
-                    // TODO: maybe we should send a disconnect message before we
-                    // kill the connection, so that the client gets some
-                    // feedback
-                    debug!(
-                        "connection for {:?} has lived too long, marked for death",
-                        client_addr
-                    );
-                    connection.marked_for_death = true;
-                }
-
-                if connection.marked_for_death {
-                    connections_to_kill.push(*client_addr);
-                }
-            }
-
-            {
-                let mut connections = connections.write().await;
-                for client_addr in connections_to_kill {
-                    debug!("killing connection for {:?}", client_addr);
-                    connections.remove(&client_addr);
-                }
-            }
-
-            tokio::time::sleep(Duration::from_millis(
-                configuration.server.connection_update_delay,
-            ))
-            .await;
-        }
-    }
-
-    async fn process_packet(&self, from: SocketAddr, packet_data: &[u8]) -> anyhow::Result<()> {
+    async fn handle_packet(&self, from: SocketAddr, packet_data: &[u8]) -> anyhow::Result<()> {
         let header_flags = packet_data
             .get(0..4)
             .ok_or_else(|| anyhow!("couldn't get header flags"))?;
@@ -290,27 +242,14 @@ impl Server {
             )
             .await?
             {
-                let connection = Connection::new(
-                    self.socket.clone(),
-                    from,
-                    NetChannel::new(challenge, self.configuration),
-                    self.quickplay.clone(),
-                    self.configuration,
-                );
-                debug!("created netchannel for client {:?}", from);
-                self.connections
-                    .write()
-                    .await
-                    .insert(from, connection.into());
+                self.create_connection(from, challenge).await;
             };
-        } else if let Some(connection) = self.connections.read().await.get(&from) {
-            let mut connection = connection.write().await;
-
+        } else if let Some((_, packet_receiver)) = self.connections.read().await.get(&from) {
             // It's more expensive to do this, so only decode when we have a
             // connection
             let packet_data = decode_raw_packet(packet_data)?;
 
-            connection.handle_packet(&packet_data).await?;
+            packet_receiver.send(packet_data.into_owned())?;
         } else {
             debug!(
                 "got netchannel message, but no connection with client {:?}",
@@ -321,14 +260,53 @@ impl Server {
         Ok(())
     }
 
-    async fn receive_packets(&self) {
+    async fn create_connection(&self, from: SocketAddr, challenge: u32) {
+        let connection = Connection::new(
+            self.socket.clone(),
+            from,
+            NetChannel::new(challenge, self.configuration),
+            self.quickplay.clone(),
+            self.configuration,
+        );
+
+        tokio::task::spawn(Self::remove_dead_connection(
+            connection.0.clone(),
+            Duration::from_millis(self.configuration.server.connection_timeout),
+            from,
+            self.connections.clone(),
+        ));
+        self.connections.write().await.insert(from, connection);
+
+        debug!("created netchannel for client {:?}", from);
+    }
+
+    async fn remove_dead_connection(
+        cancel_token: CancellationToken,
+        timeout: Duration,
+        client_address: SocketAddr,
+        connections: ConnectionMap,
+    ) {
+        tokio::select! {
+            _ = tokio::time::sleep(timeout) => {
+                // The connection has lived for too long, tell the worker to stop
+                cancel_token.cancel();
+            }
+
+            _ = cancel_token.cancelled() => {}
+        }
+
+        connections.write().await.remove(&client_address);
+        debug!("removed dead connection for {client_address:?}")
+    }
+
+    async fn run(&self) {
         let mut packet_data = vec![0u8; u16::MAX.into()];
         loop {
             match self.socket.recv_from(&mut packet_data).await {
                 Ok((packet_size, from)) => {
                     let packet_data = &packet_data[..packet_size];
 
-                    if let Err(err) = self.process_packet(from, packet_data).await {
+                    if let Err(err) = self.handle_packet(from, packet_data).await {
                         debug!("error occured while handling packet: {:?}", err);
                     }
                 }
@@ -337,6 +315,12 @@ impl Server {
                 }
             };
         }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
 
@@ -371,20 +355,8 @@ async fn main() -> anyhow::Result<()> {
 
     let configuration = Box::leak(Box::new(configuration));
 
-    let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
-
-    let socket = UdpSocket::bind(bind_address).await?;
-    info!("bound to address {:?}", socket.local_addr()?);
-
-    let server = Box::leak(Server::new(socket, configuration)?.into());
-
-    let mut tasks = JoinSet::new();
-
-    for _ in 0..configuration.server.num_packet_tasks {
-        tasks.spawn(server.receive_packets());
-    }
-
-    tasks.join_all().await;
+    let server = Server::new(configuration).await?;
+    server.run().await;
 
     Ok(())
 }

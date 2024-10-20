@@ -22,8 +22,6 @@ pub struct ServerConfiguration {
     /// the maximum time that a connection can live before being forcibly
     /// killed, in milliseconds
     pub connection_timeout: u64,
-    /// the number of tasks for recieving packets
-    pub num_packet_tasks: usize,
 
     /// number of bytes that can be sent in a single packet of reliable data
     pub max_reliable_packet_size: u32,
@@ -55,7 +53,6 @@ impl Configuration {
 
                 connection_update_delay: 150,
                 connection_timeout: 20_000,
-                num_packet_tasks: 8,
 
                 max_reliable_packet_size: 1024,
                 max_packets_dropped: 5000,
