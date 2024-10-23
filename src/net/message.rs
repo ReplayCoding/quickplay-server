@@ -1,10 +1,9 @@
 use anyhow::anyhow;
 use bitstream_io::{BitRead, BitWrite};
 
-use crate::{
-    io_util::{read_string, write_string},
-    netchannel::NETMSG_TYPE_BITS,
-};
+use crate::io_util::{read_string, write_string};
+
+use super::netchannel::NETMSG_TYPE_BITS;
 
 const MESSAGE_TYPE_DISCONNECT: u32 = 1; // disconnect, last message in connection
 const MESSAGE_TYPE_STRINGCMD: u32 = 4; // a string command

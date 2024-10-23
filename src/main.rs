@@ -1,8 +1,6 @@
 mod configuration;
-mod connectionless;
 mod io_util;
-mod message;
-mod netchannel;
+mod net;
 mod quickplay;
 
 use std::{
@@ -13,8 +11,8 @@ use std::{
 use anyhow::anyhow;
 use argh::FromArgs;
 use configuration::Configuration;
-use message::{Message, MessageDisconnect, MessageStringCmd};
-use netchannel::NetChannel;
+use net::message::{Message, MessageDisconnect, MessageStringCmd};
+use net::netchannel::NetChannel;
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
 use tokio::{
@@ -234,7 +232,7 @@ impl Server {
             .ok_or_else(|| anyhow!("couldn't get header flags"))?;
 
         if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-            if let Some(challenge) = connectionless::process_connectionless_packet(
+            if let Some(challenge) = net::connectionless::process_connectionless_packet(
                 &self.socket,
                 from,
                 packet_data,

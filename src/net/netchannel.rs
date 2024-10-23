@@ -28,8 +28,9 @@ use tracing::{instrument, trace};
 use crate::{
     configuration::Configuration,
     io_util::{read_varint32, write_varint32},
-    message::Message,
 };
+
+use super::message::Message;
 
 const MAX_STREAMS: usize = 2; // 0 == regular, 1 == file stream
 const MAX_SUBCHANNELS: usize = 8;
@@ -815,20 +816,20 @@ fn test_netchannels_unreliable() {
     let mut server_channel = NetChannel::new(0, configuration);
     let mut client_channel = NetChannel::new(0, configuration);
 
-    let messages = [Message::Print(crate::message::MessagePrint {
+    let messages = [Message::Print(super::message::MessagePrint {
         text: "0".to_string(),
     })];
     let packet = client_channel.create_send_packet(&messages).unwrap();
     let recieved_messages = server_channel.process_packet(&packet).unwrap();
     assert_eq!(recieved_messages, messages);
 
-    let messages = [Message::Print(crate::message::MessagePrint {
+    let messages = [Message::Print(super::message::MessagePrint {
         text: "1".to_string(),
     })];
     let out_of_order_packet = client_channel.create_send_packet(&messages).unwrap();
 
     // out-of-order messages should not stop newer messages from being sent and received
-    let messages = [Message::Print(crate::message::MessagePrint {
+    let messages = [Message::Print(super::message::MessagePrint {
         text: "2".to_string(),
     })];
     let packet = client_channel.create_send_packet(&messages).unwrap();
@@ -842,7 +843,7 @@ fn test_netchannels_unreliable() {
     );
 
     // dropped packets should not stop newer messages from being sent and received
-    let messages = [Message::Print(crate::message::MessagePrint {
+    let messages = [Message::Print(super::message::MessagePrint {
         text: "3".to_string(),
     })];
     let packet = client_channel.create_send_packet(&messages).unwrap();
@@ -860,7 +861,7 @@ fn test_netchannels_reliable() {
     let mut test_reliable = |num_messages: usize, drop_every_n_packets: usize| {
         let mut messages = vec![];
         for i in 0..num_messages {
-            messages.push(Message::Print(crate::message::MessagePrint {
+            messages.push(Message::Print(super::message::MessagePrint {
                 text: i.to_string(),
             }));
         }
