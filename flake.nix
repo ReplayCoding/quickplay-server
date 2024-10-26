@@ -16,7 +16,7 @@
 	  pkgs = (import nixpkgs) { inherit system; };
           rust-pkgs = fenix.packages.${system}.stable;
         in pkgs.mkShell {
-          nativeBuildInputs = with rust-pkgs; [ rustc cargo rustfmt clippy rust-analyzer ];
+          nativeBuildInputs = with rust-pkgs; [ rustc cargo rustfmt clippy ];
           RUST_SRC_PATH = "${rust-pkgs.rust-src}/lib/rustlib/src/rust/library";
         });
     };
