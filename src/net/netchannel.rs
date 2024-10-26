@@ -586,7 +586,7 @@ impl NetChannel {
         flags |= PacketFlags::PACKET_FLAG_CHALLENGE;
         writer.write_out::<32, _>(self.challenge)?;
 
-        if self.send_outgoing_subchannel_data(&mut writer)? {
+        if self.send_outgoing_reliable_data(&mut writer)? {
             flags |= PacketFlags::PACKET_FLAG_RELIABLE;
         }
 
@@ -628,20 +628,15 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    fn send_outgoing_subchannel_data<W: BitWrite>(
+    fn send_outgoing_reliable_data<W: BitWrite>(
         &mut self,
         writer: &mut W,
     ) -> anyhow::Result<bool> {
-        self.update_outgoing_subchannels()?;
+        self.fill_outgoing_subchannel()?;
 
         // Find a subchannel that we can send
-        let subchannel = self
-            .outgoing_subchannels
-            .iter_mut()
-            .enumerate()
-            .find(|(_, s)| s.state == SubChannelState::WaitingToSend);
-
-        if let Some((subchannel_index, subchannel)) = subchannel {
+        if let Some(subchannel_index) = self.find_subchannel(SubChannelState::WaitingToSend) {
+            let subchannel = &mut self.outgoing_subchannels[subchannel_index];
             assert!(MAX_SUBCHANNELS <= 8);
             writer.write_out::<3, _>(subchannel_index as u8)?;
 
@@ -722,19 +717,16 @@ impl NetChannel {
         }
     }
 
+    /// Fill a single free subchannel with data
     #[instrument(skip_all)]
-    fn update_outgoing_subchannels(&mut self) -> anyhow::Result<()> {
-        let subchannel = self
-            .outgoing_subchannels
-            .iter_mut()
-            .enumerate()
-            .find(|(_, s)| s.state == SubChannelState::Free);
+    fn fill_outgoing_subchannel(&mut self) -> anyhow::Result<()> {
+        if let Some(subchannel_index) = self.find_subchannel(SubChannelState::Free) {
+            let subchannel = &mut self.outgoing_subchannels[subchannel_index];
 
-        if let Some((subchannel_index, subchannel)) = subchannel {
             let mut send_data = false;
 
             // max number of fragments that may be sent in one packet
-            let mut max_send_fragments: u32 =
+            let mut remaining_send_fragments: u32 =
                 self.configuration.server.max_reliable_packet_size / FRAGMENT_SIZE;
 
             for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
@@ -748,18 +740,15 @@ impl NetChannel {
 
                     // number of fragments we'll send in this packet
                     let num_fragments: u32 =
-                        max_send_fragments.min(stream.total_fragments() - sent_fragments);
+                        remaining_send_fragments.min(stream.total_fragments() - sent_fragments);
 
                     subchannel.start_fragment[streams_idx] = sent_fragments;
                     subchannel.num_fragments[streams_idx] = num_fragments;
                     stream.pending_fragments += num_fragments;
                     send_data = true;
 
-                    if let Some(new_max_send_fragments) =
-                        max_send_fragments.checked_sub(num_fragments)
-                    {
-                        max_send_fragments = new_max_send_fragments;
-                    } else {
+                    remaining_send_fragments -= num_fragments;
+                    if remaining_send_fragments == 0 {
                         // Can't send any more data
                         break;
                     }
@@ -776,6 +765,15 @@ impl NetChannel {
         }
 
         Ok(())
+    }
+
+    // Find a subchannel with the desired state
+    fn find_subchannel(&self, state: SubChannelState) -> Option<usize> {
+        self.outgoing_subchannels
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.state == state)
+            .map(|s| s.0)
     }
 
     pub fn queue_reliable_messages(&mut self, messages: &[Message]) -> anyhow::Result<()> {
