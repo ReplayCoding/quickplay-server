@@ -193,9 +193,9 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    pub fn process_packet(&mut self, packet: &[u8]) -> anyhow::Result<Vec<Message>> {
+    pub fn read_packet(&mut self, packet: &[u8]) -> anyhow::Result<Vec<Message>> {
         let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
-        let flags = self.parse_header(&mut reader, packet)?;
+        let flags = self.read_header(&mut reader, packet)?;
 
         let mut messages = vec![];
 
@@ -215,17 +215,17 @@ impl NetChannel {
             );
 
             for i in 0..MAX_STREAMS {
-                self.process_incoming_subchannel_data(i, &mut messages)?;
+                self.read_reliable_messages(i, &mut messages)?;
             }
         }
 
-        self.process_messages(&mut reader, packet.len(), &mut messages)?;
+        self.read_messages(&mut reader, packet.len(), &mut messages)?;
 
         Ok(messages)
     }
 
     #[instrument(skip_all)]
-    fn parse_header<R, E>(
+    fn read_header<R, E>(
         &mut self,
         reader: &mut BitReader<R, E>,
         packet: &[u8],
@@ -298,17 +298,17 @@ impl NetChannel {
             return Err(anyhow!("number of packets dropped ({num_packets_dropped}) has exceeded maximum allowed ({})", self.configuration.server.max_packets_dropped));
         }
 
-        self.update_outgoing_subchannel_ack(sequence_ack, reliable_state)?;
+        self.update_outgoing_subchannels(sequence_ack, reliable_state)?;
 
         self.in_sequence_nr = sequence;
         self.out_sequence_nr_ack = sequence_ack;
 
-        self.check_outgoing_subchannel_completion()?;
+        self.pop_completed_outgoing_transfers()?;
 
         Ok(flags)
     }
 
-    fn update_outgoing_subchannel_ack(
+    fn update_outgoing_subchannels(
         &mut self,
         sequence_ack: u32,
         acked_reliable_state: u8,
@@ -365,7 +365,7 @@ impl NetChannel {
         Ok(())
     }
 
-    fn check_outgoing_subchannel_completion(&mut self) -> anyhow::Result<()> {
+    fn pop_completed_outgoing_transfers(&mut self) -> anyhow::Result<()> {
         for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
             let mut stream_completed = false;
             if let Some(stream) = streams.front() {
@@ -458,7 +458,8 @@ impl NetChannel {
             .as_mut()
             .ok_or_else(|| anyhow!("no active subchannel data"))?;
 
-        if (start_fragment + num_fragments) == received_data.total_fragments() {
+        let packet_total_fragments = start_fragment + num_fragments;
+        if packet_total_fragments == received_data.total_fragments() {
             // we are receiving the last fragment, adjust length
             let rest = FRAGMENT_SIZE - (received_data.bytes % FRAGMENT_SIZE);
             trace!("rest {rest}");
@@ -468,7 +469,7 @@ impl NetChannel {
             }
         };
 
-        if (start_fragment + num_fragments) > received_data.total_fragments() {
+        if packet_total_fragments > received_data.total_fragments() {
             return Err(anyhow!(
                 "Received out-of-bounds fragment: {} + {} > {}",
                 start_fragment,
@@ -498,7 +499,7 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    fn process_incoming_subchannel_data(
+    fn read_reliable_messages(
         &mut self,
         stream: usize,
         messages: &mut Vec<Message>,
@@ -522,7 +523,7 @@ impl NetChannel {
 
             if received_data.filename.is_none() {
                 let mut reader = BitReader::endian(Cursor::new(&received_data.data), LittleEndian);
-                self.process_messages(&mut reader, received_data.data.len(), messages)?;
+                self.read_messages(&mut reader, received_data.data.len(), messages)?;
             } else {
                 return Err(anyhow!("file upload"));
             }
@@ -535,7 +536,7 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    fn process_messages<R, E>(
+    fn read_messages<R, E>(
         &self,
         reader: &mut BitReader<R, E>,
         data_len: usize,
@@ -564,7 +565,7 @@ impl NetChannel {
     // TODO: this should take some sort of socket wrapper that handles packet
     // splitting and compression
     #[instrument(skip_all)]
-    pub fn create_send_packet(&mut self, messages: &[Message]) -> anyhow::Result<Vec<u8>> {
+    pub fn write_packet(&mut self, messages: &[Message]) -> anyhow::Result<Vec<u8>> {
         let mut buffer: Vec<u8> = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
 
@@ -586,7 +587,7 @@ impl NetChannel {
         flags |= PacketFlags::PACKET_FLAG_CHALLENGE;
         writer.write_out::<32, _>(self.challenge)?;
 
-        if self.send_outgoing_reliable_data(&mut writer)? {
+        if self.write_outgoing_reliable_data(&mut writer)? {
             flags |= PacketFlags::PACKET_FLAG_RELIABLE;
         }
 
@@ -628,10 +629,7 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    fn send_outgoing_reliable_data<W: BitWrite>(
-        &mut self,
-        writer: &mut W,
-    ) -> anyhow::Result<bool> {
+    fn write_outgoing_reliable_data<W: BitWrite>(&mut self, writer: &mut W) -> anyhow::Result<bool> {
         self.fill_outgoing_subchannel()?;
 
         // Find a subchannel that we can send
@@ -745,6 +743,7 @@ impl NetChannel {
                     subchannel.start_fragment[streams_idx] = sent_fragments;
                     subchannel.num_fragments[streams_idx] = num_fragments;
                     stream.pending_fragments += num_fragments;
+
                     send_data = true;
 
                     remaining_send_fragments -= num_fragments;
@@ -817,26 +816,26 @@ fn test_netchannels_unreliable() {
     let messages = [Message::Print(super::message::MessagePrint {
         text: "0".to_string(),
     })];
-    let packet = client_channel.create_send_packet(&messages).unwrap();
-    let recieved_messages = server_channel.process_packet(&packet).unwrap();
+    let packet = client_channel.write_packet(&messages).unwrap();
+    let recieved_messages = server_channel.read_packet(&packet).unwrap();
     assert_eq!(recieved_messages, messages);
 
     let messages = [Message::Print(super::message::MessagePrint {
         text: "1".to_string(),
     })];
-    let out_of_order_packet = client_channel.create_send_packet(&messages).unwrap();
+    let out_of_order_packet = client_channel.write_packet(&messages).unwrap();
 
     // out-of-order messages should not stop newer messages from being sent and received
     let messages = [Message::Print(super::message::MessagePrint {
         text: "2".to_string(),
     })];
-    let packet = client_channel.create_send_packet(&messages).unwrap();
-    let recieved_messages = server_channel.process_packet(&packet).unwrap();
+    let packet = client_channel.write_packet(&messages).unwrap();
+    let recieved_messages = server_channel.read_packet(&packet).unwrap();
     assert_eq!(recieved_messages, messages);
 
     // this should be dropped when received
     assert!(
-        server_channel.process_packet(&out_of_order_packet).is_err(),
+        server_channel.read_packet(&out_of_order_packet).is_err(),
         "Out-of-order packets should not be processed"
     );
 
@@ -844,8 +843,8 @@ fn test_netchannels_unreliable() {
     let messages = [Message::Print(super::message::MessagePrint {
         text: "3".to_string(),
     })];
-    let packet = client_channel.create_send_packet(&messages).unwrap();
-    let received_messages = server_channel.process_packet(&packet).unwrap();
+    let packet = client_channel.write_packet(&messages).unwrap();
+    let received_messages = server_channel.read_packet(&packet).unwrap();
     assert_eq!(received_messages, messages);
 }
 
@@ -874,7 +873,7 @@ fn test_netchannels_reliable() {
             trace!(
                 "--------------------------------------------------------------------------------"
             );
-            let packet = client_channel.create_send_packet(&[]).unwrap();
+            let packet = client_channel.write_packet(&[]).unwrap();
 
             // packets must be created by the client, but not received by the server
             if drop_every_n_packets != 0 && packet_counter % drop_every_n_packets == 0 {
@@ -886,20 +885,20 @@ fn test_netchannels_reliable() {
             trace!(
                 "--------------------------------------------------------------------------------"
             );
-            let received_messages = server_channel.process_packet(&packet).unwrap();
+            let received_messages = server_channel.read_packet(&packet).unwrap();
 
             trace!("RECEIVER - CREATE ACK");
             trace!(
                 "--------------------------------------------------------------------------------"
             );
             // receiver must be able to send ack back to sender
-            let packet = server_channel.create_send_packet(&[]).unwrap();
+            let packet = server_channel.write_packet(&[]).unwrap();
 
             trace!("SENDER - RECEIVE ACK");
             trace!(
                 "--------------------------------------------------------------------------------"
             );
-            client_channel.process_packet(&packet).unwrap();
+            client_channel.read_packet(&packet).unwrap();
 
             // larger transfers should be split up into multiple chunks
             // this will hang if the message never gets received due to a bug

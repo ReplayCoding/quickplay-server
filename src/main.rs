@@ -73,7 +73,7 @@ impl Connection {
     }
 
     async fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let messages = self.netchan.process_packet(data)?;
+        let messages = self.netchan.read_packet(data)?;
 
         for message in messages {
             trace!("got message {:?}", message);
@@ -135,7 +135,7 @@ impl Connection {
             }
 
             // allow the netchannel to send remaining reliable data
-            match self.netchan.create_send_packet(&[]) {
+            match self.netchan.write_packet(&[]) {
                 Ok(data) => {
                     if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
                         warn!("error occured while sending outgoing data: {:?}", err);
