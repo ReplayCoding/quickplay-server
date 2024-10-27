@@ -629,13 +629,17 @@ impl NetChannel {
     }
 
     #[instrument(skip_all)]
-    fn write_outgoing_reliable_data<W: BitWrite>(&mut self, writer: &mut W) -> anyhow::Result<bool> {
+    fn write_outgoing_reliable_data<W: BitWrite>(
+        &mut self,
+        writer: &mut W,
+    ) -> anyhow::Result<bool> {
         self.fill_outgoing_subchannel()?;
 
         // Find a subchannel that we can send
         if let Some(subchannel_index) = self.find_subchannel(SubChannelState::WaitingToSend) {
             let subchannel = &mut self.outgoing_subchannels[subchannel_index];
             assert!(MAX_SUBCHANNELS <= 8);
+            trace!("writing subchannel {subchannel_index}");
             writer.write_out::<3, _>(subchannel_index as u8)?;
 
             for (streams_idx, streams) in self.outgoing_reliable_data.iter_mut().enumerate() {
@@ -711,6 +715,7 @@ impl NetChannel {
 
             Ok(true)
         } else {
+            trace!("no subchannel waiting for send");
             Ok(false)
         }
     }
@@ -735,6 +740,9 @@ impl NetChannel {
                         // No data left to send
                         continue;
                     }
+
+                    trace!("filling outgoing subchannel {} with stream {} acked {} pending {} [send non-trunced {}]",
+                        subchannel_index, streams_idx, stream.acked_fragments, stream.pending_fragments, sent_fragments);
 
                     // number of fragments we'll send in this packet
                     let num_fragments: u32 =
@@ -850,12 +858,18 @@ fn test_netchannels_unreliable() {
 
 #[test]
 fn test_netchannels_reliable() {
+    tracing_subscriber::fmt::init();
     let configuration = Box::leak(Box::new(Configuration::load_default()));
 
     let mut server_channel = NetChannel::new(0, configuration);
     let mut client_channel = NetChannel::new(0, configuration);
 
-    let mut test_reliable = |num_messages: usize, drop_every_n_packets: usize| {
+    fn test_reliable(
+        num_messages: usize,
+        drop_if: impl Fn(i32) -> bool,
+        client_channel: &mut NetChannel,
+        server_channel: &mut NetChannel,
+    ) {
         let mut messages = vec![];
         for i in 0..num_messages {
             messages.push(Message::Print(super::message::MessagePrint {
@@ -867,8 +881,6 @@ fn test_netchannels_reliable() {
 
         let mut packet_counter = 0;
         loop {
-            packet_counter += 1;
-
             trace!("SENDER");
             trace!(
                 "--------------------------------------------------------------------------------"
@@ -876,16 +888,22 @@ fn test_netchannels_reliable() {
             let packet = client_channel.write_packet(&[]).unwrap();
 
             // packets must be created by the client, but not received by the server
-            if drop_every_n_packets != 0 && packet_counter % drop_every_n_packets == 0 {
-                trace!("dropping packet");
-                continue;
+            let mut received_messages = vec![];
+            let do_send;
+            if drop_if(packet_counter) {
+                trace!("$$$$$ DROPPING PACKET $$$$$");
+                do_send = false;
+            } else {
+                do_send = true;
             }
 
-            trace!("RECEIVER");
-            trace!(
-                "--------------------------------------------------------------------------------"
-            );
-            let received_messages = server_channel.read_packet(&packet).unwrap();
+            if do_send {
+                trace!("RECEIVER");
+                trace!(
+                    "--------------------------------------------------------------------------------"
+                );
+                received_messages = server_channel.read_packet(&packet).unwrap();
+            }
 
             trace!("RECEIVER - CREATE ACK");
             trace!(
@@ -906,18 +924,33 @@ fn test_netchannels_reliable() {
                 assert_eq!(received_messages, messages);
                 break;
             }
-        }
-    };
 
-    test_reliable(1, 0);
+            packet_counter += 1;
+        }
+    }
+
+    test_reliable(1, |_| false, &mut client_channel, &mut server_channel);
 
     // make sure that multiple transfers can be sent/received in one session
-    test_reliable(5000, 0);
+    test_reliable(5000, |_| false, &mut client_channel, &mut server_channel);
 
-    // reliable messages must be delivered even when packets are dropped this
-    // hangs if every other message is dropped (5000, 2), because every message
-    // that contains a reliable payload will be dropped due to the way the
-    // testing function is implemented. in practice this shouldn't be an issue,
-    // as an unreliable link won't drop exactly every other message.
-    test_reliable(5000, 3);
+    // reliable transfers should be received, even on bad connections.
+    // NOTE: if every other packet is dropped, the transfer will never complete.
+    // this is due to how the protocol works, not a bug in the implementation
+    // TODO: if the first packet is dropped, then the reciever will never get
+    // the header, and so any transfers after that will give an error until the
+    // header is resent. add a test for this after we add better error handling.
+    test_reliable(
+        5000,
+        |packet_counter| match packet_counter {
+            0..500 => packet_counter % 2 == 1,
+            500..1000 => true,
+            _ => false,
+        },
+        &mut client_channel,
+        &mut server_channel,
+    );
+
+    // final sanity check
+    test_reliable(1, |_| false, &mut client_channel, &mut server_channel);
 }
