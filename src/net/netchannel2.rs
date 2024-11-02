@@ -146,4 +146,30 @@ mod tests {
 
         assert_eq!(calculate_checksum(&[1, 2, 3, 4]), EXPECTED_CHECKSUM);
     }
+
+    #[test]
+    fn test_validate_checksum_matching() {
+        // calculated using https://www.crccalc.com/?crc=01020304&method=CRC-32%2FISO-HDLC&datatype=1&outtype=0
+        const EXPECTED_CHECKSUM: u16 = 0xb63c ^ 0xfbcd;
+
+        assert!(validate_checksum(EXPECTED_CHECKSUM, &[1, 2, 3, 4]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_checksum_non_matching() {
+        const EXPECTED_CHECKSUM: u16 = 0xb63c ^ 0xfbcd;
+        const ACTUAL_CHECKSUM: u16 = 0xe951 ^ 0xa406;
+
+        assert!(
+            validate_checksum(EXPECTED_CHECKSUM, &[4, 3, 2, 1]).is_err_and(|e| {
+                match e {
+                    NetChannelError::InvalidChecksum { expected, actual } => {
+                        expected == EXPECTED_CHECKSUM && actual == ACTUAL_CHECKSUM
+                    }
+
+                    _ => false,
+                }
+            })
+        );
+    }
 }
