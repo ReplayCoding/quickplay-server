@@ -9,7 +9,9 @@ use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use tokio::net::UdpSocket;
 use tracing::trace;
 
-use crate::{configuration::Configuration, io_util::write_string, CONNECTIONLESS_HEADER};
+use crate::{configuration::Configuration, io_util::write_string};
+
+use super::packet::CONNECTIONLESS_HEADER;
 
 const PROTOCOL_VERSION: u8 = 24;
 const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;

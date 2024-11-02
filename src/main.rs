@@ -4,15 +4,14 @@ mod net;
 mod quickplay;
 
 use std::{
-    borrow::Cow, collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc,
-    time::Duration,
+    collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
 };
 
-use anyhow::anyhow;
 use argh::FromArgs;
 use configuration::Configuration;
 use net::message::{Message, MessageDisconnect, MessageStringCmd};
 use net::netchannel::NetChannel;
+use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
 use tokio::{
@@ -24,12 +23,6 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
-
-const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
-const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
-const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
-
-const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
 struct Connection {
     socket: Arc<UdpSocket>,
@@ -156,42 +149,6 @@ impl Connection {
     }
 }
 
-fn decompress_packet(packet_data: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let compression_type = packet_data
-        .get(4..8)
-        .ok_or_else(|| anyhow!("couldn't get compression type"))?;
-
-    match compression_type {
-        COMPRESSION_SNAPPY => {
-            let compressed_data = packet_data
-                .get(8..)
-                .ok_or_else(|| anyhow!("couldn't get compressed data"))?;
-
-            let mut decoder = snap::raw::Decoder::new();
-            Ok(decoder.decompress_vec(compressed_data)?)
-        }
-        _ => Err(anyhow!("unhandled compression type {compression_type:?}")),
-    }
-}
-
-fn decode_raw_packet(packet_data: &[u8]) -> anyhow::Result<Cow<'_, [u8]>> {
-    let header_flags = packet_data
-        .get(0..4)
-        .ok_or_else(|| anyhow!("couldn't get header flags"))?;
-
-    if header_flags == SPLITPACKET_HEADER.to_le_bytes() {
-        return Err(anyhow!("handle splitpacket"));
-    }
-
-    if header_flags == COMPRESSEDPACKET_HEADER.to_le_bytes() {
-        let decompressed_packet = decompress_packet(packet_data)?;
-
-        return Ok(Cow::Owned(decompressed_packet));
-    }
-
-    Ok(Cow::Borrowed(packet_data))
-}
-
 type ConnectionMap =
     Arc<RwLock<HashMap<SocketAddr, (CancellationToken, UnboundedSender<Vec<u8>>)>>>;
 struct Server {
@@ -227,32 +184,31 @@ impl Server {
     }
 
     async fn handle_packet(&self, from: SocketAddr, packet_data: &[u8]) -> anyhow::Result<()> {
-        let header_flags = packet_data
-            .get(0..4)
-            .ok_or_else(|| anyhow!("couldn't get header flags"))?;
+        let packet = decode_raw_packet(packet_data)?;
 
-        if header_flags == CONNECTIONLESS_HEADER.to_le_bytes() {
-            if let Some(challenge) = net::connectionless::process_connectionless_packet(
-                &self.socket,
-                from,
-                packet_data,
-                self.configuration,
-            )
-            .await?
-            {
-                self.create_connection(from, challenge).await;
-            };
-        } else if let Some((_, packet_receiver)) = self.connections.read().await.get(&from) {
-            // It's more expensive to do this, so only decode when we have a
-            // connection
-            let packet_data = decode_raw_packet(packet_data)?;
-
-            packet_receiver.send(packet_data.into_owned())?;
-        } else {
-            debug!(
-                "got netchannel message, but no connection with client {:?}",
-                from
-            );
+        match packet {
+            Packet::Connectionless(data) => {
+                if let Some(challenge) = net::connectionless::process_connectionless_packet(
+                    &self.socket,
+                    from,
+                    &data,
+                    self.configuration,
+                )
+                .await?
+                {
+                    self.create_connection(from, challenge).await;
+                };
+            }
+            Packet::Regular(data) => {
+                if let Some((_, packet_receiver)) = self.connections.read().await.get(&from) {
+                    packet_receiver.send(data.into_owned())?;
+                } else {
+                    debug!(
+                        "got netchannel message, but no connection with client {:?}",
+                        from
+                    );
+                }
+            }
         }
 
         Ok(())
