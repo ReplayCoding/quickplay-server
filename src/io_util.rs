@@ -1,13 +1,13 @@
 use bitstream_io::{BitRead, BitWrite};
 
-pub fn write_string<W: BitWrite>(reader: &mut W, string: &str) -> std::io::Result<()> {
+pub fn write_string(reader: &mut impl BitWrite, string: &str) -> std::io::Result<()> {
     reader.write_bytes(string.as_bytes())?;
     reader.write_out::<8, _>(0)?; // write NUL terminator
 
     std::io::Result::Ok(())
 }
 
-pub fn read_string<R: BitRead>(reader: &mut R, max_len: usize) -> anyhow::Result<String> {
+pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> anyhow::Result<String> {
     let mut data = vec![];
     let mut chars_read = 0;
     loop {
@@ -28,7 +28,7 @@ pub fn read_string<R: BitRead>(reader: &mut R, max_len: usize) -> anyhow::Result
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
-pub fn read_varint32<R: BitRead>(reader: &mut R) -> anyhow::Result<u32> {
+pub fn read_varint32(reader: &mut impl BitRead) -> anyhow::Result<u32> {
     let mut result: u32 = 0;
     let mut count: u32 = 0;
 
@@ -50,7 +50,7 @@ pub fn read_varint32<R: BitRead>(reader: &mut R) -> anyhow::Result<u32> {
     Ok(result)
 }
 
-pub fn write_varint32<W: BitWrite>(writer: &mut W, value: u32) -> anyhow::Result<()> {
+pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> anyhow::Result<()> {
     let mut value = value;
 
     while value > 0x7f {
