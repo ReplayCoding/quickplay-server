@@ -1,13 +1,15 @@
+use std::io;
+
 use bitstream_io::{BitRead, BitWrite};
 
-pub fn write_string(reader: &mut impl BitWrite, string: &str) -> std::io::Result<()> {
+pub fn write_string(reader: &mut impl BitWrite, string: &str) -> io::Result<()> {
     reader.write_bytes(string.as_bytes())?;
     reader.write_out::<8, _>(0)?; // write NUL terminator
 
-    std::io::Result::Ok(())
+    io::Result::Ok(())
 }
 
-pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> anyhow::Result<String> {
+pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> io::Result<String> {
     let mut data = vec![];
     let mut chars_read = 0;
     loop {
@@ -24,11 +26,16 @@ pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> anyhow::Result<
         }
     }
 
-    Ok(String::from_utf8(data)?)
+    Ok(String::from_utf8(data).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })?)
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
-pub fn read_varint32(reader: &mut impl BitRead) -> std::io::Result<u32> {
+pub fn read_varint32(reader: &mut impl BitRead) -> io::Result<u32> {
     let mut result: u32 = 0;
     let mut count: u32 = 0;
 
@@ -50,7 +57,7 @@ pub fn read_varint32(reader: &mut impl BitRead) -> std::io::Result<u32> {
     Ok(result)
 }
 
-pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> std::io::Result<()> {
+pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> io::Result<()> {
     let mut value = value;
 
     while value > 0x7f {
