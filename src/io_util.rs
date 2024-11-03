@@ -28,7 +28,7 @@ pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> anyhow::Result<
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
-pub fn read_varint32(reader: &mut impl BitRead) -> anyhow::Result<u32> {
+pub fn read_varint32(reader: &mut impl BitRead) -> std::io::Result<u32> {
     let mut result: u32 = 0;
     let mut count: u32 = 0;
 
@@ -50,7 +50,7 @@ pub fn read_varint32(reader: &mut impl BitRead) -> anyhow::Result<u32> {
     Ok(result)
 }
 
-pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> anyhow::Result<()> {
+pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> std::io::Result<()> {
     let mut value = value;
 
     while value > 0x7f {
