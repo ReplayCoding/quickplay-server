@@ -2,7 +2,7 @@ use std::{collections::VecDeque, io::Cursor, ops::Range};
 
 use crate::io_util;
 
-use super::message::{Message, NETMSG_TYPE_BITS};
+use super::message::Message;
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, LittleEndian};
 use strum::{EnumCount, EnumIter, IntoEnumIterator};

@@ -1,4 +1,3 @@
-use anyhow::anyhow;
 use bitstream_io::{BitRead, BitWrite};
 
 use crate::io_util::{read_string, write_string};
