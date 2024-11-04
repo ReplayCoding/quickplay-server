@@ -3,7 +3,7 @@ use bitstream_io::{BitRead, BitWrite};
 
 use crate::io_util::{read_string, write_string};
 
-use super::netchannel::NETMSG_TYPE_BITS;
+pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 
 const MESSAGE_TYPE_DISCONNECT: u32 = 1; // disconnect, last message in connection
 const MESSAGE_TYPE_STRINGCMD: u32 = 4; // a string command
@@ -21,7 +21,7 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn read<R: BitRead>(reader: &mut R, message_type: u32) -> anyhow::Result<Self> {
+    pub fn read<R: BitRead>(reader: &mut R, message_type: u32) -> std::io::Result<Self> {
         match message_type {
             MESSAGE_TYPE_DISCONNECT => {
                 let reason = read_string(reader, 1024)?;
@@ -51,11 +51,12 @@ impl Message {
             MESSAGE_TYPE_PRINT => Ok(Message::Print(MessagePrint {
                 text: read_string(reader, 2048)?,
             })),
-            _ => Err(anyhow!("unhandled message type {message_type}")),
+
+            _ => todo!(),
         }
     }
 
-    pub fn write<W: BitWrite>(&self, writer: &mut W) -> anyhow::Result<()> {
+    pub fn write<W: BitWrite>(&self, writer: &mut W) -> std::io::Result<()> {
         match self {
             Message::StringCmd(message) => {
                 writer.write_out::<NETMSG_TYPE_BITS, _>(MESSAGE_TYPE_STRINGCMD)?;
@@ -70,7 +71,7 @@ impl Message {
                 write_string(writer, &message.reason)?;
             }
 
-            _ => return Err(anyhow!("unhandled message {:?} for write", self)),
+            _ => todo!(),
         };
 
         Ok(())
