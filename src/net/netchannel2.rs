@@ -2,7 +2,7 @@ use std::{collections::VecDeque, io::Cursor, ops::Range};
 
 use crate::io_util;
 
-use super::message::Message;
+use super::message::{Message, NETMSG_TYPE_BITS};
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, LittleEndian};
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
@@ -29,6 +29,8 @@ pub enum NetChannelError {
     TransferTooLarge(u32),
     #[error("transfer data is out of bounds")]
     OutOfBoundsTransferData,
+    #[error("tried to access data when transfer is incomplete")]
+    IncompleteTransfer,
 }
 
 impl From<std::io::Error> for NetChannelError {
@@ -95,6 +97,12 @@ const MAX_FILE_SIZE: u32 = (1 << MAX_FILE_SIZE_BITS) - 1;
 
 const PATH_OSMAX: usize = 260;
 
+#[derive(Debug)]
+enum TransferType {
+    Message,
+    File { transfer_id: u32, filename: String },
+}
+
 struct OutgoingReliableTransfer {}
 
 impl OutgoingReliableTransfer {
@@ -116,13 +124,12 @@ struct IncomingReliableTransfer {
     /// Will the transfer be sent in multiple packets
     multi_block: bool,
 
-    transfer_id: Option<u32>,
-    /// Filename, used for file transfers only
-    filename: Option<String>,
+    /// The type of the transfer.
+    transfer_type: TransferType,
 
     /// Number of acknowledged fragments. When this matches the total number of
     /// fragments, the transfer is complete.
-    acked_fragments: u32,
+    received_fragments: u32,
 }
 
 impl IncomingReliableTransfer {
@@ -133,14 +140,20 @@ impl IncomingReliableTransfer {
     ) -> Result<Self, NetChannelError> {
         let bytes;
         let mut uncompressed_size = None;
-        let mut transfer_id = None;
-        let mut filename = None;
 
+        let transfer_type;
         if is_multi_block {
             // Is it a file?
             if reader.read_bit()? {
-                transfer_id = Some(reader.read_in::<32, u32>()?);
-                filename = Some(io_util::read_string(reader, PATH_OSMAX)?);
+                let transfer_id = reader.read_in::<32, u32>()?;
+                let filename = io_util::read_string(reader, PATH_OSMAX)?;
+
+                transfer_type = TransferType::File {
+                    transfer_id,
+                    filename,
+                };
+            } else {
+                transfer_type = TransferType::Message;
             }
 
             // Is it compressed?
@@ -155,6 +168,8 @@ impl IncomingReliableTransfer {
                 uncompressed_size = Some(reader.read_in::<MAX_FILE_SIZE_BITS, u32>()?);
             }
 
+            // Single block transfer can't be file transfers.
+            transfer_type = TransferType::Message;
             bytes = io_util::read_varint32(reader)?;
         }
 
@@ -162,13 +177,16 @@ impl IncomingReliableTransfer {
             return Err(NetChannelError::TransferTooLarge(bytes));
         }
 
-        let mut buffer = Vec::new();
-        // NOTE: I'm not entirely sure if padding it is necessary, but Source
-        // does this too.
-        buffer.resize(
-            usize::try_from(pad_number(bytes, 4))
-                .map_err(|_| NetChannelError::TransferTooLarge(bytes))?,
-            0,
+        let buffer = vec![
+            0u8;
+            usize::try_from(bytes)
+                .map_err(|_| NetChannelError::TransferTooLarge(bytes))?
+        ];
+
+        trace!(
+            "creating incoming transfer, is multi block: {is_multi_block}, \
+                total bytes: {bytes}, uncompressed size: {uncompressed_size:?}, \
+                type: {transfer_type:?}"
         );
 
         Ok(Self {
@@ -177,15 +195,10 @@ impl IncomingReliableTransfer {
             size: bytes,
             multi_block: is_multi_block,
 
-            transfer_id,
-            filename,
+            transfer_type,
 
-            acked_fragments: 0,
+            received_fragments: 0,
         })
-    }
-
-    fn num_fragments(&self) -> u32 {
-        bytes_to_fragments(self.size)
     }
 
     /// Read data from the packet into the transfer. If the transfer is
@@ -193,11 +206,12 @@ impl IncomingReliableTransfer {
     fn read_data(
         &mut self,
         reader: &mut impl BitRead,
-        start_fragment: u32,
+        mut start_fragment: u32,
         mut num_fragments: u32,
     ) -> Result<(), NetChannelError> {
         // Single block transfers
         if !self.multi_block {
+            start_fragment = 0;
             num_fragments = self.num_fragments();
         }
 
@@ -208,15 +222,45 @@ impl IncomingReliableTransfer {
             self.num_fragments(),
         )?;
 
+        trace!(
+            "reading {num_fragments} fragments starting at {start_fragment}. byte range is {:?}",
+            range
+        );
         let data = self
             .buffer
             .get_mut(range)
             .ok_or(NetChannelError::OutOfBoundsTransferData)?;
 
         reader.read_bytes(data)?;
-        self.acked_fragments += num_fragments;
+        self.received_fragments += num_fragments;
 
         Ok(())
+    }
+
+    /// Returns the total number of fragments in the transfer.
+    fn num_fragments(&self) -> u32 {
+        bytes_to_fragments(self.size)
+    }
+
+    /// Returns true if the all fragments have been received
+    fn completed(&self) -> bool {
+        self.received_fragments == self.num_fragments()
+    }
+
+    /// Return the data received in the transfer.
+    fn data(self) -> Result<(TransferType, Vec<u8>), NetChannelError> {
+        if !self.completed() {
+            return Err(NetChannelError::IncompleteTransfer);
+        }
+
+        Ok((
+            self.transfer_type,
+            match self.uncompressed_size {
+                Some(uncompressed_size) => todo!(),
+                // No compression, just use the buffer as-is
+                None => self.buffer,
+            },
+        ))
     }
 }
 
@@ -264,7 +308,8 @@ impl SubChannel {
 
     /// Update the subchannel. TODO: elaborate
     fn update(&mut self, acknowledged: bool) -> Result<(), NetChannelError> {
-        todo!()
+        // TODO
+        Ok(())
     }
 }
 
@@ -283,14 +328,14 @@ pub struct NetChannel2 {
     /// Reliable state for outgoing subchannels
     out_reliable_state: u8,
     /// Outgoing reliable transfer data
-    out_reliable_data: PerStream<VecDeque<OutgoingReliableTransfer>>,
+    out_reliable_transfers: PerStream<VecDeque<OutgoingReliableTransfer>>,
     /// Subchannels for outgoing reliable data
     subchannels: [SubChannel; MAX_SUBCHANNELS],
 
     /// Reliable state for incoming subchannels
     in_reliable_state: u8,
     /// Incoming reliable transfer data
-    in_reliable_data: PerStream<Option<IncomingReliableTransfer>>,
+    in_reliable_transfers: PerStream<Option<IncomingReliableTransfer>>,
 }
 
 impl NetChannel2 {
@@ -304,11 +349,11 @@ impl NetChannel2 {
             out_sequence_nr_ack: 0,
 
             out_reliable_state: 0,
-            out_reliable_data: PerStream::new(|_| VecDeque::new()),
+            out_reliable_transfers: PerStream::new(|_| VecDeque::new()),
             subchannels: std::array::from_fn(|_| SubChannel::new()),
 
             in_reliable_state: 0,
-            in_reliable_data: PerStream::new(|_| None),
+            in_reliable_transfers: PerStream::new(|_| None),
         }
     }
 
@@ -323,7 +368,7 @@ impl NetChannel2 {
         }
 
         self.read_completed_incoming_transfers(&mut messages)?;
-        self.read_messages(&mut reader, &mut messages)?;
+        read_messages(&mut reader, &mut messages)?;
 
         Ok(messages)
     }
@@ -337,6 +382,9 @@ impl NetChannel2 {
         let sequence = reader.read_in::<32, i32>()?;
         let sequence_ack = reader.read_in::<32, i32>()?;
         let flags: PacketFlags = PacketFlags::from_bits_truncate(reader.read_in::<8, u8>()?);
+        trace!(
+            "got packet with sequence {sequence}, acked sequence {sequence_ack}, flags {flags:?}"
+        );
 
         // Offset of data after the checksum
         const CHECKSUM_DATA_OFFSET: usize = 11;
@@ -411,19 +459,19 @@ impl NetChannel2 {
     fn update_subchannel_acks(&mut self, reliable_state_ack: u8) -> Result<(), NetChannelError> {
         for subchannel_index in 0..MAX_SUBCHANNELS {
             let mask = 1 << subchannel_index;
-            let subchannel = &mut self.subchannels[subchannel_index];
             let acknowledged = (self.out_reliable_state) == (reliable_state_ack & mask);
 
+            let subchannel = &mut self.subchannels[subchannel_index];
             subchannel.update(acknowledged)?;
         }
 
-        todo!()
+        Ok(())
     }
 
     /// Remove completed outgoing transfers from the queue
     fn pop_completed_outgoing_transfers(&mut self) {
         for stream in StreamType::iter() {
-            let transfers = self.out_reliable_data.stream(stream);
+            let transfers = self.out_reliable_transfers.stream(stream);
             let Some(transfer) = transfers.front() else {
                 continue;
             };
@@ -439,6 +487,7 @@ impl NetChannel2 {
 
         for stream in StreamType::iter() {
             if reader.read_bit()? {
+                trace!("got data for stream {stream:?}");
                 self.read_subchannel_data(reader, stream)?;
             }
         }
@@ -465,56 +514,76 @@ impl NetChannel2 {
 
         // Start of the transfer, read the header
         if start_fragment == 0 {
-            *self.in_reliable_data.stream(stream) = Some(
+            *self.in_reliable_transfers.stream(stream) = Some(
                 IncomingReliableTransfer::new_from_header(reader, is_multi_block)?,
             );
         }
 
         let transfer = self
-            .in_reliable_data
+            .in_reliable_transfers
             .stream(stream)
             .as_mut()
             .ok_or(NetChannelError::NoActiveTransfer(stream))?;
 
         transfer.read_data(reader, start_fragment, num_fragments)?;
 
-        todo!()
+        Ok(())
     }
 
     /// Read any completed reliable message transfers.
     fn read_completed_incoming_transfers(
-        &self,
-        messages: &[Message],
-    ) -> Result<(), NetChannelError> {
-        todo!()
-    }
-
-    /// Read all remaining messages from a bitstream. Any messages that are read
-    /// will be appended to `messages`.
-    fn read_messages(
-        &self,
-        reader: &mut impl BitRead,
+        &mut self,
         messages: &mut Vec<Message>,
     ) -> Result<(), NetChannelError> {
-        todo!()
+        for stream in StreamType::iter() {
+            let Some(transfer) = self.in_reliable_transfers.stream(stream) else {
+                continue;
+            };
+
+            if !transfer.completed() {
+                continue;
+            }
+
+            trace!("incoming transfer for stream {stream:?} completed");
+            let transfer = self.in_reliable_transfers.stream(stream).take().expect(
+                "transfer is Some() but take returned None! this should never ever happen!",
+            );
+
+            let (transfer_type, data) = transfer.data()?;
+            match transfer_type {
+                TransferType::Message => {
+                    let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+                    read_messages(&mut reader, messages)?
+                }
+                TransferType::File {
+                    transfer_id,
+                    filename,
+                } => todo!(),
+            }
+        }
+        Ok(())
     }
 
     /// Write a single packet. Any messages in `messages` will be sent as unreliable.
     pub fn write_packet(&mut self, messages: &[Message]) -> Result<Vec<u8>, NetChannelError> {
-        todo!()
+        //TODO
+        Ok(vec![])
     }
 
     /// Queue reliable messages to be sent.
     pub fn queue_reliable_messages(&mut self, messages: &[Message]) -> Result<(), NetChannelError> {
-        todo!()
+        //TODO
+        Ok(())
     }
 }
 
 /// Validate that `checksum` matches the checksum for `data`. Returns Ok(()) if
 /// they match.
-#[allow(unused)]
 fn validate_checksum(checksum: u16, data: &[u8]) -> Result<(), NetChannelError> {
     let calculated_checksum = calculate_checksum(data);
+    trace!(
+        "calculated packet checksum {calculated_checksum:04x}, expected checksum is {checksum:04x}"
+    );
 
     if calculated_checksum == checksum {
         Ok(())
@@ -535,6 +604,28 @@ fn calculate_checksum(data: &[u8]) -> u16 {
     let high_part = (crc >> 16) & 0xffff;
 
     (low_part ^ high_part) as u16
+}
+
+/// Read all remaining messages from a bitstream. Any messages that are read
+/// will be appended to `messages`.
+fn read_messages(
+    reader: &mut impl BitRead,
+    messages: &mut Vec<Message>,
+) -> Result<(), NetChannelError> {
+    loop {
+        // I'm not entirely sure if this is correct, since it *might* be
+        // possible for padding to be exactly 6 bits.
+        match reader.read_in::<{ super::message::NETMSG_TYPE_BITS }, u32>() {
+            Ok(message_type) => {
+                let message = Message::read(reader, message_type).unwrap();
+                messages.push(message);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
