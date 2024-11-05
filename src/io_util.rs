@@ -2,9 +2,9 @@ use std::io;
 
 use bitstream_io::{BitRead, BitWrite};
 
-pub fn write_string(reader: &mut impl BitWrite, string: &str) -> io::Result<()> {
-    reader.write_bytes(string.as_bytes())?;
-    reader.write_out::<8, _>(0)?; // write NUL terminator
+pub fn write_string(writer: &mut impl BitWrite, string: &str) -> io::Result<()> {
+    writer.write_bytes(string.as_bytes())?;
+    writer.write_out::<8, _>(0)?; // write NUL terminator
 
     io::Result::Ok(())
 }
