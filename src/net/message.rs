@@ -4,6 +4,7 @@ use crate::io_util::{read_string, write_string};
 
 pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 
+const MESSAGE_TYPE_NOP: u32 = 0;
 const MESSAGE_TYPE_DISCONNECT: u32 = 1; // disconnect, last message in connection
 const MESSAGE_TYPE_FILE: u32 = 2; // file request or denial
 const MESSAGE_TYPE_STRINGCMD: u32 = 4; // a string command
@@ -13,6 +14,7 @@ const MESSAGE_TYPE_PRINT: u32 = 7; // print text to console
 
 #[derive(Debug)]
 pub enum Message {
+    Nop,
     Disconnect(MessageDisconnect),
     File(MessageFile),
     StringCmd(MessageStringCmd),
@@ -24,6 +26,7 @@ pub enum Message {
 impl Message {
     pub fn read<R: BitRead>(reader: &mut R, message_type: u32) -> std::io::Result<Self> {
         match message_type {
+            MESSAGE_TYPE_NOP => Ok(Message::Nop),
             MESSAGE_TYPE_DISCONNECT => {
                 let reason = read_string(reader, 1024)?;
                 Ok(Message::Disconnect(MessageDisconnect { reason }))
@@ -68,7 +71,7 @@ impl Message {
                 }))
             }
 
-            _ => todo!(),
+            _ => todo!("unimplemented message: {}", message_type),
         }
     }
 

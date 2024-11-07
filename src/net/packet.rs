@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 use thiserror::Error;
 
+use super::compression::{self, CompressionError};
+
 pub const CONNECTIONLESS_HEADER: u32 = -1_i32 as u32;
 const SPLITPACKET_HEADER: u32 = -2_i32 as u32;
 const COMPRESSEDPACKET_HEADER: u32 = -3_i32 as u32;
-
-const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
 #[derive(Error, Debug)]
 pub enum PacketDecoderError {
@@ -13,14 +13,8 @@ pub enum PacketDecoderError {
     NoHeaderFlags,
     #[error("split packets are currently unimplemented")]
     SplitPacket,
-    #[error("no compression type found")]
-    NoCompressionType,
-    #[error("unknown compression type: {0:02x?}")]
-    UnhandledCompressionType([u8; 4]),
-    #[error("no compressed data found")]
-    NoCompressedData,
-    #[error("decompression error: {0:?}")]
-    DecompressionError(snap::Error),
+    #[error("compression error: {0:?}")]
+    Compression(CompressionError),
 }
 
 /// A decompressed/reassembled packet.
@@ -40,7 +34,9 @@ pub fn decode_raw_packet(packet_data: &[u8]) -> Result<Packet, PacketDecoderErro
     }
 
     let packet_data = if header_flags == COMPRESSEDPACKET_HEADER.to_le_bytes() {
-        let decompressed_packet = decompress_packet(packet_data)?;
+        // Slice is safe because header_flags is 4 bytes long
+        let decompressed_packet =
+            compression::decompress(&packet_data[4..]).map_err(PacketDecoderError::Compression)?;
 
         Cow::Owned(decompressed_packet)
     } else {
@@ -58,29 +54,4 @@ pub fn decode_raw_packet(packet_data: &[u8]) -> Result<Packet, PacketDecoderErro
             Packet::Regular(packet_data)
         },
     )
-}
-
-fn decompress_packet(packet_data: &[u8]) -> Result<Vec<u8>, PacketDecoderError> {
-    let compression_type = packet_data
-        .get(4..8)
-        .ok_or(PacketDecoderError::NoCompressionType)?;
-
-    match compression_type {
-        COMPRESSION_SNAPPY => {
-            let compressed_data = packet_data
-                .get(8..)
-                .ok_or(PacketDecoderError::NoCompressedData)?;
-
-            let mut decoder = snap::raw::Decoder::new();
-            decoder
-                .decompress_vec(compressed_data)
-                .map_err(PacketDecoderError::DecompressionError)
-        }
-
-        _ => Err(PacketDecoderError::UnhandledCompressionType(
-            // .unwrap() will never fail because compression_type is always
-            // exactly 4 bytes
-            compression_type.try_into().unwrap(),
-        )),
-    }
 }

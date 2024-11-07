@@ -2,7 +2,10 @@ use std::{io::Cursor, ops::Range};
 
 use crate::io_util;
 
-use super::message::Message;
+use super::{
+    compression::{self, CompressionError},
+    message::Message,
+};
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
@@ -31,6 +34,8 @@ pub enum NetChannelError {
     OutOfBoundsTransferData,
     #[error("tried to access data when transfer is incomplete")]
     IncompleteTransfer,
+    #[error("compression error: {0:?}")]
+    Compression(CompressionError),
 }
 
 impl From<std::io::Error> for NetChannelError {
@@ -249,7 +254,9 @@ impl IncomingReliableTransfer {
         Ok((
             self.transfer_type,
             match self.uncompressed_size {
-                Some(uncompressed_size) => todo!(),
+                Some(_uncompressed_size) => {
+                    compression::decompress(&self.buffer).map_err(NetChannelError::Compression)?
+                }
                 // No compression, just use the buffer as-is
                 None => self.buffer,
             },
