@@ -10,7 +10,7 @@ use std::{
 use argh::FromArgs;
 use configuration::Configuration;
 use net::message::{Message, MessageDisconnect, MessageStringCmd};
-use net::netchannel::NetChannel;
+use net::netchannel2::NetChannel2;
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
@@ -28,7 +28,7 @@ struct Connection {
     socket: Arc<UdpSocket>,
     client_addr: SocketAddr,
     packet_receiver: UnboundedReceiver<Vec<u8>>,
-    netchan: NetChannel,
+    netchan: NetChannel2,
     cancel_token: CancellationToken,
 
     quickplay: QuickplaySession,
@@ -40,7 +40,7 @@ impl Connection {
     fn new(
         socket: Arc<UdpSocket>,
         client_addr: SocketAddr,
-        netchan: NetChannel,
+        netchan: NetChannel2,
         quickplay: Arc<QuickplayGlobal>,
         configuration: &'static Configuration,
     ) -> (CancellationToken, UnboundedSender<Vec<u8>>) {
@@ -81,7 +81,7 @@ impl Connection {
                     let message =
                         if let Some(destination_server) = { self.quickplay.find_server().await } {
                             Message::StringCmd(MessageStringCmd {
-                                command: format!("redirect {}", destination_server),
+                                command: format!("echo {}", destination_server),
                             })
                         } else {
                             Message::Disconnect(MessageDisconnect {
@@ -128,7 +128,11 @@ impl Connection {
             }
 
             // allow the netchannel to send remaining reliable data
-            match self.netchan.write_packet(&[]) {
+            match self
+                .netchan
+                .write_packet(&[Message::Print(net::message::MessagePrint {
+                    text: "AAPSODKAPODKSPOKPKOSPOKDAPOSK🐸✨".to_string().repeat(2),
+                })]) {
                 Ok(data) => {
                     if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
                         warn!("error occured while sending outgoing data: {:?}", err);
@@ -218,7 +222,7 @@ impl Server {
         let connection = Connection::new(
             self.socket.clone(),
             from,
-            NetChannel::new(challenge, self.configuration),
+            NetChannel2::new(challenge),
             self.quickplay.clone(),
             self.configuration,
         );
