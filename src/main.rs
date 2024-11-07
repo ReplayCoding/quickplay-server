@@ -33,6 +33,8 @@ struct Connection {
 
     quickplay: QuickplaySession,
 
+    balls: bool,
+
     configuration: &'static Configuration,
 }
 
@@ -56,6 +58,7 @@ impl Connection {
             cancel_token: cancel_token.clone(),
 
             quickplay: QuickplaySession::new(quickplay, configuration),
+            balls: false,
 
             configuration,
         };
@@ -128,11 +131,23 @@ impl Connection {
             }
 
             // allow the netchannel to send remaining reliable data
-            match self
-                .netchan
-                .write_packet(&[Message::Print(net::message::MessagePrint {
-                    text: "AAPSODKAPODKSPOKPKOSPOKDAPOSK🐸✨".to_string().repeat(2),
-                })]) {
+            let messages: &[Message] = if !self.balls {
+                self.balls = true;
+                &[
+                    Message::Print(net::message::MessagePrint {
+                        text: "AAPSODKAPODKSPOKPKOSPOKDAPOSK🐸✨\n".to_string().repeat(2),
+                    }),
+                    Message::File(net::message::MessageFile {
+                        mode: net::message::MessageFileMode::Request,
+                        filename: "tf2_playerstats.dmx".to_string(),
+                        transfer_id: 12,
+                    }),
+                ]
+            } else {
+                &[]
+            };
+
+            match self.netchan.write_packet(messages) {
                 Ok(data) => {
                     if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
                         warn!("error occured while sending outgoing data: {:?}", err);
