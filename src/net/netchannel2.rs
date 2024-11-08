@@ -809,17 +809,45 @@ mod tests {
     }
 
     #[test]
-    fn test_read_messages() {
-        // TODO
-    }
+    fn test_read_messages_single() {
+        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let expected_message = Message::Print(crate::net::message::MessagePrint {
+            text: "test string yay".to_string(),
+        });
 
-    #[test]
-    fn test_read_messages_aligned() {
-        // TODO
+        expected_message.write(&mut writer).unwrap();
+
+        writer.byte_align().unwrap();
+
+        let mut reader =
+            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
+        let mut messages = vec![];
+        read_messages(&mut reader, &mut messages).unwrap();
+
+        assert_eq!(messages, &[expected_message]);
     }
 
     #[test]
     fn test_messages_roundtrip() {
-        // TODO
+        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let expected_messages = &[
+            Message::Print(crate::net::message::MessagePrint {
+                text: "test string yay".to_string(),
+            }),
+            Message::Disconnect(crate::net::message::MessageDisconnect {
+                reason: "disconnect message (sad)".to_string(),
+            }),
+        ];
+
+        write_messages(&mut writer, expected_messages).unwrap();
+
+        writer.byte_align().unwrap();
+
+        let mut reader =
+            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
+        let mut messages = vec![];
+        read_messages(&mut reader, &mut messages).unwrap();
+
+        assert_eq!(messages, expected_messages);
     }
 }
