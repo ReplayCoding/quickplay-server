@@ -69,7 +69,7 @@ impl Connection {
     }
 
     async fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let messages = self.netchan.read_packet(data)?;
+        let (messages, files) = self.netchan.read_packet(data)?;
 
         for message in messages {
             trace!("got message {:?}", message);
@@ -109,6 +109,10 @@ impl Connection {
 
                 _ => debug!("received unhandled message: {:?}", message),
             }
+        }
+
+        for file in files {
+            std::fs::write(file.filename, file.data)?;
         }
 
         Ok(())

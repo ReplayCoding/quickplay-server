@@ -113,6 +113,12 @@ enum TransferType {
     File { transfer_id: u32, filename: String },
 }
 
+pub struct ReceivedFile {
+    pub transfer_id: u32,
+    pub filename: String,
+    pub data: Vec<u8>,
+}
+
 struct IncomingReliableTransfer {
     /// Data buffer to hold the incoming transfer
     buffer: Vec<u8>,
@@ -348,19 +354,23 @@ impl NetChannel2 {
     }
 
     /// Read a single packet and returns the messages that were received.
-    pub fn read_packet(&mut self, packet: &[u8]) -> Result<Vec<Message>, NetChannelError> {
+    pub fn read_packet(
+        &mut self,
+        packet: &[u8],
+    ) -> Result<(Vec<Message>, Vec<ReceivedFile>), NetChannelError> {
         let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
         let mut messages = vec![];
+        let mut files = vec![];
 
         let flags = self.read_header(&mut reader, packet)?;
         if flags.contains(PacketFlags::RELIABLE) {
             self.read_reliable(&mut reader)?;
         }
 
-        self.read_completed_incoming_transfers(&mut messages)?;
+        self.read_completed_incoming_transfers(&mut messages, &mut files)?;
         read_messages(&mut reader, &mut messages)?;
 
-        Ok(messages)
+        Ok((messages, files))
     }
 
     /// Read the packet header.
@@ -506,6 +516,7 @@ impl NetChannel2 {
     fn read_completed_incoming_transfers(
         &mut self,
         messages: &mut Vec<Message>,
+        files: &mut Vec<ReceivedFile>,
     ) -> Result<(), NetChannelError> {
         for stream in StreamType::iter() {
             let Some(transfer) = self.in_reliable_transfers.stream_mut(stream) else {
@@ -530,7 +541,11 @@ impl NetChannel2 {
                 TransferType::File {
                     transfer_id,
                     filename,
-                } => todo!(),
+                } => files.push(ReceivedFile {
+                    transfer_id,
+                    filename,
+                    data,
+                }),
             }
         }
         Ok(())
@@ -850,4 +865,5 @@ mod tests {
 
         assert_eq!(messages, expected_messages);
     }
+    // TODO: reliable transfer tests
 }
