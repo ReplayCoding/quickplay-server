@@ -107,7 +107,7 @@ const MAX_FILE_SIZE: u32 = (1 << MAX_FILE_SIZE_BITS) - 1;
 
 const PATH_OSMAX: usize = 260;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum TransferType {
     Message,
     File { transfer_id: u32, filename: String },
@@ -119,6 +119,7 @@ pub struct ReceivedFile {
     pub data: Vec<u8>,
 }
 
+#[derive(Debug)]
 struct IncomingReliableTransfer {
     /// Data buffer to hold the incoming transfer
     buffer: Vec<u8>,
@@ -693,6 +694,8 @@ fn write_messages(writer: &mut impl BitWrite, messages: &[Message]) -> Result<()
 
 #[cfg(test)]
 mod tests {
+    use io_util::{write_string, write_varint32};
+
     use super::*;
 
     #[test]
@@ -865,5 +868,119 @@ mod tests {
 
         assert_eq!(messages, expected_messages);
     }
-    // TODO: reliable transfer tests
+
+    #[test]
+    fn test_reliable_read_header_single_block() {
+        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+
+        writer.write_bit(true).unwrap(); // is compressed
+        writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
+
+        write_varint32(&mut writer, 1234).unwrap(); // size
+
+        writer.byte_align().unwrap();
+
+        let data = writer.into_writer().into_inner();
+        let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+
+        let transfer = IncomingReliableTransfer::new_from_header(&mut reader, false).unwrap();
+        assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
+        assert_eq!(transfer.size, 1234);
+        assert_eq!(transfer.uncompressed_size, Some(5678));
+        assert_eq!(transfer.multi_block, false);
+    }
+
+    #[test]
+    fn test_reliable_read_header_multi_block() {
+        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+
+        writer.write_bit(true).unwrap(); // is file
+        writer.write_out::<32, u32>(9999).unwrap();
+        const FILENAME: &str = "very real filename.txt";
+        write_string(&mut writer, FILENAME).unwrap();
+
+        writer.write_bit(true).unwrap(); // is compressed
+        writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
+
+        writer.write_out::<MAX_FILE_SIZE_BITS, u32>(1234).unwrap(); // size
+
+        writer.byte_align().unwrap();
+
+        let data = writer.into_writer().into_inner();
+        let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+
+        let transfer = IncomingReliableTransfer::new_from_header(&mut reader, true).unwrap();
+        assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
+        assert_eq!(transfer.size, 1234);
+        assert_eq!(transfer.uncompressed_size, Some(5678));
+        assert_eq!(transfer.multi_block, true);
+        assert_eq!(
+            transfer.transfer_type,
+            TransferType::File {
+                transfer_id: 9999,
+                filename: FILENAME.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_reliable_read_data_single_block() {
+        const BUFFER_SIZE: u16 = 1234;
+        let mut transfer = IncomingReliableTransfer {
+            buffer: vec![0u8; BUFFER_SIZE.into()],
+            size: BUFFER_SIZE.into(),
+            uncompressed_size: None,
+            multi_block: false,
+            transfer_type: TransferType::Message,
+            received_fragments: 0,
+        };
+
+        let mut test_buffer = vec![];
+        for i in 0..BUFFER_SIZE {
+            test_buffer.push(i as u8);
+        }
+
+        let mut reader = BitReader::endian(Cursor::new(&test_buffer), LittleEndian);
+
+        transfer.read_data(&mut reader, 0, 0).unwrap();
+
+        assert_eq!(
+            transfer.data().unwrap(),
+            (TransferType::Message, test_buffer)
+        )
+    }
+
+    #[test]
+    fn test_reliable_read_data_multi_block() {
+        const BUFFER_SIZE: u16 = 1234;
+        let mut transfer = IncomingReliableTransfer {
+            buffer: vec![0u8; BUFFER_SIZE.into()],
+            size: BUFFER_SIZE.into(),
+            uncompressed_size: None,
+            multi_block: true,
+            transfer_type: TransferType::Message,
+            received_fragments: 0,
+        };
+
+        let mut test_buffer = vec![];
+        for i in 0..BUFFER_SIZE {
+            test_buffer.push(i as u8);
+        }
+
+        let mut reader = BitReader::endian(Cursor::new(&test_buffer), LittleEndian);
+
+        // Send the transfer in 2 chunks
+        let half_fragments = bytes_to_fragments(BUFFER_SIZE.into()) / 2;
+        let remaining_fragments =
+            bytes_to_fragments(u32::from(BUFFER_SIZE) - (half_fragments * FRAGMENT_SIZE));
+        transfer.read_data(&mut reader, 0, half_fragments).unwrap();
+        transfer
+            .read_data(&mut reader, half_fragments, remaining_fragments)
+            .unwrap();
+
+        assert_eq!(
+            transfer.data().unwrap(),
+            (TransferType::Message, test_buffer)
+        )
+    }
 }
