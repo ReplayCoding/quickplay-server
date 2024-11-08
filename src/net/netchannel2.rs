@@ -761,7 +761,7 @@ mod tests {
         // does the conversion correctly.
         assert!(
             usize::try_from(FRAGMENT_SIZE).is_ok(),
-            "FRAGMENT_SIZE must fit into a usize for these tests for be correct"
+            "FRAGMENT_SIZE must fit into a usize for these tests to be correct"
         );
 
         assert_eq!(
@@ -779,5 +779,47 @@ mod tests {
             0..FRAGMENT_SIZE as usize,
             "beginning chunks should take an entire fragment"
         );
+    }
+
+    #[test]
+    fn test_write_checksum() {
+        let mut buf: Vec<u8> = vec![];
+        for _ in 0..CHECKSUM_OFFSET {
+            buf.push(0x0F);
+        }
+
+        // Dummy checksum
+        buf.push(0xAA);
+        buf.push(0xBB);
+
+        // calculated using https://www.crccalc.com/?crc=01020304&method=CRC-32%2FISO-HDLC&datatype=1&outtype=0
+        const EXPECTED_CHECKSUM: u16 = 0xb63c ^ 0xfbcd;
+        for i in 1..=4 {
+            buf.push(i);
+        }
+
+        write_checksum(&mut buf);
+        let written_checksum = u16::from_le_bytes(
+            buf[CHECKSUM_OFFSET..CHECKSUM_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        );
+
+        assert_eq!(EXPECTED_CHECKSUM, written_checksum);
+    }
+
+    #[test]
+    fn test_read_messages() {
+        // TODO
+    }
+
+    #[test]
+    fn test_read_messages_aligned() {
+        // TODO
+    }
+
+    #[test]
+    fn test_messages_roundtrip() {
+        // TODO
     }
 }
