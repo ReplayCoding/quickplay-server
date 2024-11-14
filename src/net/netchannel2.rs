@@ -1,4 +1,4 @@
-use std::{io::Cursor, ops::Range};
+use std::{collections::VecDeque, io::Cursor, ops::Range};
 
 use crate::io_util;
 
@@ -8,7 +8,7 @@ use super::{
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
-use strum::{EnumCount, EnumIter, IntoEnumIterator};
+use strum::{EnumCount, EnumDiscriminants, EnumIter, IntoEnumIterator};
 use thiserror::Error;
 use tracing::trace;
 
@@ -36,6 +36,8 @@ pub enum NetChannelError {
     IncompleteTransfer,
     #[error("compression error: {0:?}")]
     Compression(CompressionError),
+    #[error("invalid reliable state")]
+    InvalidReliableState,
 }
 
 impl From<std::io::Error> for NetChannelError {
@@ -69,6 +71,7 @@ pub enum StreamType {
     File = 1,
 }
 
+#[derive(Debug, Clone)]
 struct PerStream<T> {
     streams: [T; StreamType::COUNT],
 }
@@ -111,6 +114,378 @@ const PATH_OSMAX: usize = 260;
 enum TransferType {
     Message,
     File { transfer_id: u32, filename: String },
+}
+
+struct OutgoingReliableTransfer {
+    /// The data to be sent
+    data: Vec<u8>,
+    /// The type of the transfer
+    transfer_type: TransferType,
+
+    /// Number of sent fragments
+    sent_fragments: u32,
+    /// Number of acknowledged fragments
+    acked_fragments: u32,
+}
+impl OutgoingReliableTransfer {
+    fn new(transfer_type: TransferType, data: Vec<u8>) -> Result<Self, NetChannelError> {
+        let size: u32 = data
+            .len()
+            .try_into()
+            .map_err(|_| NetChannelError::TransferTooLarge)?;
+        if size > MAX_FILE_SIZE {
+            return Err(NetChannelError::TransferTooLarge);
+        }
+
+        // TODO: compression
+
+        Ok(Self {
+            data,
+            transfer_type,
+            sent_fragments: 0,
+            acked_fragments: 0,
+        })
+    }
+
+    /// Return the total number of bytes that will be sent in the transfer.
+    fn size(&self) -> u32 {
+        // This cast is alright because the size is checked in `new`
+        self.data.len() as u32
+    }
+
+    /// Return the total number of fragments that will be sent in the transfer.
+    fn total_fragments(&self) -> u32 {
+        bytes_to_fragments(self.size())
+    }
+
+    /// Return the number of fragments that have been sent or have been reserved
+    /// by a subchannel.
+    fn sent_fragments(&self) -> u32 {
+        self.sent_fragments
+    }
+
+    fn acked_fragments(&self) -> u32 {
+        self.acked_fragments
+    }
+
+    fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn transfer_type(&self) -> &TransferType {
+        &self.transfer_type
+    }
+
+    fn uncompressed_size(&self) -> Option<u32> {
+        // TODO
+        None
+    }
+
+    fn mark_sent(&mut self, num_fragments: u32) {
+        self.sent_fragments += num_fragments;
+    }
+
+    fn mark_acked(&mut self, num_fragments: u32) {
+        self.acked_fragments += num_fragments;
+    }
+}
+
+/// A range that stores length, instead of the end of the range.
+#[derive(PartialEq, Debug, Clone, Copy)]
+struct LengthRange<T> {
+    start: T,
+    length: T,
+}
+
+impl<T: Copy + std::ops::Add<Output = T>> LengthRange<T> {
+    fn new(start: T, length: T) -> Self {
+        Self { start, length }
+    }
+
+    fn try_cast<C>(&self) -> Result<LengthRange<C>, <C as TryFrom<T>>::Error>
+    where
+        C: TryFrom<T> + Copy + std::ops::Add<Output = C>,
+    {
+        Ok(LengthRange::new(
+            C::try_from(self.start)?,
+            C::try_from(self.length)?,
+        ))
+    }
+
+    fn into_range(self) -> Range<T> {
+        self.start..(self.start + self.length)
+    }
+}
+
+const SUBCHANNEL_FRAGMENT_COUNT_BITS: u32 = 3;
+// TODO: What is a reasonable size for this?
+const SUBCHANNEL_MAX_SEND_SIZE: u32 = u32::MAX;
+const MAX_SUBCHANNELS: usize = 8;
+
+#[derive(EnumDiscriminants)]
+#[strum_discriminants(name(SubchannelStateType))]
+enum SubchannelState {
+    Free,
+    WaitingToSend {
+        fragments: PerStream<Option<LengthRange<u32>>>,
+    },
+    WaitingForAck {
+        fragments: PerStream<Option<LengthRange<u32>>>,
+        send_seq_nr: i32,
+    },
+}
+
+type OutgoingReliableTransfers = PerStream<VecDeque<OutgoingReliableTransfer>>;
+
+struct Subchannel {
+    state: SubchannelState,
+    /// This is flipped every time the channel is filled. If it doesn't match up
+    /// with the acknowledged reliable state, then we know the subchannel data
+    /// hasn't been received.
+    reliable_state: bool,
+}
+
+impl Subchannel {
+    /// Create a new free subchannel.
+    fn new() -> Self {
+        Self {
+            state: SubchannelState::Free,
+            reliable_state: false,
+        }
+    }
+
+    /// Returns the current state of the subchannel.
+    fn state(&self) -> SubchannelStateType {
+        SubchannelStateType::from(&self.state)
+    }
+
+    /// Try to fill the subchannel with the frontmost transfer. Will panic if
+    /// the subchannel is not in the free state.
+    fn fill(
+        &mut self,
+        transfers: &mut OutgoingReliableTransfers,
+        mut budget: u32,
+    ) -> Result<(), NetChannelError> {
+        assert!(self.state() == SubchannelStateType::Free);
+
+        let mut filled = false;
+        let mut fragment_streams = PerStream::new(|_| None);
+        for stream in StreamType::iter() {
+            let Some(transfer) = transfers.stream_mut(stream).front_mut() else {
+                // No transfers to send
+                continue;
+            };
+
+            if transfer.total_fragments() == transfer.sent_fragments() {
+                // No fragments left to fill
+                continue;
+            }
+
+            let start_fragment = transfer.sent_fragments();
+            let num_fragments = (transfer.total_fragments() - transfer.sent_fragments())
+                .min(budget) // don't send more fragments than we have budget for
+                .min(1 << SUBCHANNEL_FRAGMENT_COUNT_BITS); // don't try to fill more fragments than can sucessfully written
+
+            trace!(
+                "filled subchannel with fragments. start {start_fragment}, length {num_fragments}"
+            );
+            *fragment_streams.stream_mut(stream) =
+                Some(LengthRange::new(start_fragment, num_fragments));
+            transfer.mark_sent(num_fragments);
+            filled = true;
+
+            budget -= num_fragments;
+            if budget == 0 {
+                // Can't write anything more
+                break;
+            }
+        }
+
+        if filled {
+            self.state = SubchannelState::WaitingToSend {
+                fragments: fragment_streams,
+            };
+            // If any data is filled, reliable state must be flipped
+            self.reliable_state = !self.reliable_state;
+        }
+
+        Ok(())
+    }
+
+    /// Write the subchannel to a bitstream. Will panic if the subchannel isn't
+    /// waiting to send.
+    fn write(
+        &mut self,
+        writer: &mut impl BitWrite,
+        transfers: &OutgoingReliableTransfers,
+        subchannel_index: u8,
+        send_seq_nr: i32,
+    ) -> Result<(), NetChannelError> {
+        let SubchannelState::WaitingToSend { fragments } = &self.state else {
+            panic!("Subchannel isn't waiting to send!")
+        };
+
+        writer.write_out::<3, _>(subchannel_index)?;
+
+        for stream in StreamType::iter() {
+            let Some(fragments) = fragments.stream(stream) else {
+                // No data for this stream
+                writer.write_bit(false)?;
+                continue;
+            };
+            let transfer = transfers
+                .stream(stream)
+                .front()
+                .expect("Writing subchannel data, but not active transfer!");
+
+            // Signal that we have data for this stream
+            writer.write_bit(true)?;
+
+            let bytes = calculate_reliable_data_range(
+                fragments.start,
+                fragments.length,
+                transfer.size(),
+                transfer.total_fragments(),
+            );
+            trace!("writing stream {stream:?} in subchannel {subchannel_index}. fragments {fragments:?}, bytes {bytes:?}");
+
+            self.write_header(writer, transfer, *fragments, bytes)?;
+
+            let bytes = bytes
+                .try_cast::<usize>()
+                .map_err(|_| NetChannelError::TransferTooLarge)?
+                .into_range();
+            writer.write_bytes(&transfer.data()[bytes])?;
+        }
+
+        self.state = SubchannelState::WaitingForAck {
+            fragments: fragments.clone(),
+            send_seq_nr,
+        };
+
+        Ok(())
+    }
+
+    fn write_header(
+        &self,
+        writer: &mut impl BitWrite,
+        transfer: &OutgoingReliableTransfer,
+        fragments: LengthRange<u32>,
+        bytes: LengthRange<u32>,
+    ) -> Result<(), NetChannelError> {
+        let is_single_block = (fragments.length == transfer.total_fragments())
+            && transfer.transfer_type() == &TransferType::Message;
+
+        writer.write_bit(!is_single_block)?;
+        if is_single_block {
+            assert!(
+                fragments.start == 0,
+                "sending all fragments, but not starting at 0?"
+            );
+            assert!(
+                bytes.length == transfer.size(),
+                "sending all fragments, but byte length doesn't match?"
+            );
+
+            if let Some(uncompressed_size) = transfer.uncompressed_size() {
+                writer.write_bit(true)?;
+                writer.write_out::<MAX_FILE_SIZE_BITS, _>(uncompressed_size)?;
+            } else {
+                writer.write_bit(false)?;
+            }
+
+            io_util::write_varint32(writer, transfer.size())?;
+        } else {
+            writer.write_out::<{ MAX_FILE_SIZE_BITS - FRAGMENT_BITS }, _>(fragments.start)?;
+            writer.write_out::<SUBCHANNEL_FRAGMENT_COUNT_BITS, _>(fragments.length)?;
+
+            // If we're sending the first fragment, write the header.
+            if fragments.start == 0 {
+                match transfer.transfer_type() {
+                    TransferType::Message => writer.write_bit(false)?,
+                    TransferType::File {
+                        transfer_id,
+                        filename,
+                    } => {
+                        writer.write_bit(true)?;
+                        writer.write_out::<32, _>(*transfer_id)?;
+                        io_util::write_string(writer, &filename)?;
+                    }
+                }
+
+                if let Some(uncompressed_size) = transfer.uncompressed_size() {
+                    writer.write_bit(true)?;
+                    writer.write_out::<MAX_FILE_SIZE_BITS, _>(uncompressed_size)?;
+                } else {
+                    writer.write_bit(false)?;
+                }
+
+                writer.write_out::<MAX_FILE_SIZE_BITS, _>(transfer.size())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update the subchannel state, based on the acknowledgement state.
+    fn update(
+        &mut self,
+        transfers: &mut OutgoingReliableTransfers,
+        acknowledged_state: bool,
+        sequence_ack: i32,
+    ) -> Result<(), NetChannelError> {
+        if acknowledged_state == self.reliable_state {
+            match &self.state {
+                SubchannelState::Free | SubchannelState::WaitingToSend { fragments: _ } => {}
+                SubchannelState::WaitingForAck {
+                    fragments,
+                    send_seq_nr,
+                } => {
+                    if *send_seq_nr > sequence_ack {
+                        return Err(NetChannelError::InvalidReliableState);
+                    }
+
+                    self.mark_acked(transfers, fragments);
+                    self.state = SubchannelState::Free;
+                }
+            }
+        } else {
+            match &self.state {
+                SubchannelState::Free | SubchannelState::WaitingToSend { fragments: _ } => {}
+                SubchannelState::WaitingForAck {
+                    fragments,
+                    send_seq_nr,
+                } => {
+                    if *send_seq_nr <= sequence_ack {
+                        trace!("resending subchannel. fragments {fragments:?}");
+                        self.state = SubchannelState::WaitingToSend {
+                            fragments: fragments.clone(),
+                        };
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn mark_acked(
+        &self,
+        transfers: &mut OutgoingReliableTransfers,
+        fragments: &PerStream<Option<LengthRange<u32>>>,
+    ) {
+        for stream in StreamType::iter() {
+            let Some(fragments) = fragments.stream(stream) else {
+                continue;
+            };
+            let transfer = transfers
+                .stream_mut(stream)
+                .front_mut()
+                .expect("acknowledging fragments, but no transfer!");
+
+            transfer.mark_acked(fragments.length);
+        }
+    }
 }
 
 pub struct ReceivedFile {
@@ -225,12 +600,17 @@ impl IncomingReliableTransfer {
             num_fragments,
             self.size,
             self.num_fragments(),
-        )?;
+        );
 
         trace!(
             "reading {num_fragments} fragments starting at {start_fragment}. byte range is {:?}",
             range
         );
+        let range = range
+            .try_cast::<usize>()
+            .map_err(|_| NetChannelError::OutOfBoundsTransferData)?
+            .into_range();
+
         let data = self
             .buffer
             .get_mut(range)
@@ -276,7 +656,7 @@ fn calculate_reliable_data_range(
     num_fragments: u32,
     total_bytes: u32,
     total_fragments: u32,
-) -> Result<Range<usize>, NetChannelError> {
+) -> LengthRange<u32> {
     let start_offset = start_fragment * FRAGMENT_SIZE;
     let mut length = num_fragments * FRAGMENT_SIZE;
 
@@ -288,10 +668,7 @@ fn calculate_reliable_data_range(
         }
     }
 
-    let start_offset =
-        usize::try_from(start_offset).map_err(|_| NetChannelError::OutOfBoundsTransferData)?;
-    let length = usize::try_from(length).map_err(|_| NetChannelError::OutOfBoundsTransferData)?;
-    Ok(start_offset..start_offset + length)
+    LengthRange::new(start_offset, length)
 }
 
 /// Pad `number`` to be on a `boundary` byte boundary.  For example,
@@ -303,8 +680,6 @@ fn pad_number(number: u32, boundary: u32) -> u32 {
 fn bytes_to_fragments(bytes: u32) -> u32 {
     pad_number(bytes, FRAGMENT_SIZE) / FRAGMENT_SIZE
 }
-
-const SUBCHANNEL_FRAGMENT_COUNT_BITS: u32 = 3;
 
 /// Implementation of Source Engine NetChannels
 pub struct NetChannel2 {
@@ -325,6 +700,11 @@ pub struct NetChannel2 {
     in_reliable_state: u8,
     /// Incoming reliable transfer data
     in_reliable_transfers: PerStream<Option<IncomingReliableTransfer>>,
+
+    /// Outgoing reliable transfer data
+    out_reliable_transfers: OutgoingReliableTransfers,
+    /// Outgoing subchannels
+    subchannels: [Subchannel; MAX_SUBCHANNELS],
 
     /// Number of choked packets. TODO: what is this used for?
     num_choked: i32,
@@ -349,6 +729,9 @@ impl NetChannel2 {
 
             in_reliable_state: 0,
             in_reliable_transfers: PerStream::new(|_| None),
+
+            out_reliable_transfers: PerStream::new(|_| VecDeque::new()),
+            subchannels: std::array::from_fn(|_| Subchannel::new()),
 
             num_choked: 0,
         }
@@ -405,7 +788,7 @@ impl NetChannel2 {
             trace!("dropped {dropped_packets} packets");
         }
 
-        self.update_subchannel_acks(reliable_state_ack)?;
+        self.update_subchannel_acks(reliable_state_ack, sequence_ack)?;
 
         self.in_sequence_nr = sequence;
         self.out_sequence_nr_ack = sequence_ack;
@@ -455,14 +838,34 @@ impl NetChannel2 {
     }
 
     /// Update the subchannels based on the acknowledged reliable state.
-    fn update_subchannel_acks(&mut self, reliable_state_ack: u8) -> Result<(), NetChannelError> {
-        // todo!()
+    fn update_subchannel_acks(
+        &mut self,
+        reliable_state_ack: u8,
+        sequence_ack: i32,
+    ) -> Result<(), NetChannelError> {
+        for (subchannel_index, subchannel) in self.subchannels.iter_mut().enumerate() {
+            let acknowledged_state = (reliable_state_ack & (1 << subchannel_index)) != 0;
+            subchannel.update(
+                &mut self.out_reliable_transfers,
+                acknowledged_state,
+                sequence_ack,
+            )?;
+        }
         Ok(())
     }
 
     /// Remove completed outgoing transfers from the queue
     fn pop_completed_outgoing_transfers(&mut self) {
-        // todo!()
+        for stream in StreamType::iter() {
+            let Some(transfer) = self.out_reliable_transfers.stream(stream).front() else {
+                continue;
+            };
+
+            if transfer.acked_fragments() == transfer.total_fragments() {
+                trace!("transfer for stream {stream:?} is complete");
+                self.out_reliable_transfers.stream_mut(stream).pop_front();
+            }
+        }
     }
 
     fn read_reliable(&mut self, reader: &mut impl BitRead) -> Result<(), NetChannelError> {
@@ -609,13 +1012,69 @@ impl NetChannel2 {
     /// Write out the reliable data for a packet. Returns `true` if data has
     /// been written.
     fn write_reliable(&mut self, writer: &mut impl BitWrite) -> Result<bool, NetChannelError> {
-        // todo!()
-        Ok(false)
+        self.fill_free_subchannel()?;
+
+        let Some(subchannel_index) = self.find_subchannel(SubchannelStateType::WaitingToSend)
+        else {
+            return Ok(false);
+        };
+        let subchannel = &mut self.subchannels[subchannel_index];
+        subchannel.write(
+            writer,
+            &self.out_reliable_transfers,
+            subchannel_index as u8,
+            self.out_sequence_nr,
+        )?;
+
+        Ok(true)
+    }
+
+    fn fill_free_subchannel(&mut self) -> Result<(), NetChannelError> {
+        let Some(subchannel_index) = self.find_subchannel(SubchannelStateType::Free) else {
+            return Ok(());
+        };
+
+        let subchannel = &mut self.subchannels[subchannel_index];
+        subchannel.fill(&mut self.out_reliable_transfers, SUBCHANNEL_MAX_SEND_SIZE)?;
+
+        Ok(())
+    }
+
+    /// Returns the index of the first subchannel with the desired state.
+    fn find_subchannel(&self, state: SubchannelStateType) -> Option<usize> {
+        self.subchannels
+            .iter()
+            .enumerate()
+            .find(|(_, s)| s.state() == state)
+            .map(|(i, _)| i)
     }
 
     /// Queue reliable messages to be sent.
     pub fn queue_reliable_messages(&mut self, messages: &[Message]) -> Result<(), NetChannelError> {
-        // todo!()
+        let mut data = vec![];
+        let mut writer = BitWriter::endian(Cursor::new(&mut data), LittleEndian);
+
+        write_messages(&mut writer, messages)?;
+        writer.byte_align()?;
+
+        self.queue_reliable_transfer(StreamType::Message, TransferType::Message, data)?;
+
+        Ok(())
+    }
+
+    /// Queue a reliable transfer to be sent.
+    fn queue_reliable_transfer(
+        &mut self,
+        stream: StreamType,
+        transfer_type: TransferType,
+        data: Vec<u8>,
+    ) -> Result<(), NetChannelError> {
+        let transfer = OutgoingReliableTransfer::new(transfer_type, data)?;
+
+        self.out_reliable_transfers
+            .stream_mut(stream)
+            .push_back(transfer);
+
         Ok(())
     }
 }
@@ -624,9 +1083,9 @@ impl NetChannel2 {
 /// they match.
 fn validate_checksum(checksum: u16, data: &[u8]) -> Result<(), NetChannelError> {
     let calculated_checksum = calculate_checksum(data);
-    trace!(
-        "calculated packet checksum {calculated_checksum:04x}, expected checksum is {checksum:04x}"
-    );
+    // trace!(
+    //     "calculated packet checksum {calculated_checksum:04x}, expected checksum is {checksum:04x}"
+    // );
 
     if calculated_checksum == checksum {
         Ok(())
@@ -773,28 +1232,19 @@ mod tests {
 
     #[test]
     fn test_calculate_reliable_data_range() {
-        // I took some shortcuts here,but this won't cause problems unless
-        // you're running on a 16-bit architecture. (at that point, good luck
-        // :D). This doesn't affect calculate_reliable_data_range itself, as it
-        // does the conversion correctly.
-        assert!(
-            usize::try_from(FRAGMENT_SIZE).is_ok(),
-            "FRAGMENT_SIZE must fit into a usize for these tests to be correct"
-        );
-
         assert_eq!(
-            calculate_reliable_data_range(0, 1, 4, 1).unwrap(),
-            0..4,
+            calculate_reliable_data_range(0, 1, 4, 1),
+            LengthRange::new(0, 4),
             "chunks for transfers smaller than a fragment should not take an entire fragment"
         );
         assert_eq!(
-            calculate_reliable_data_range(1, 1, FRAGMENT_SIZE + 4, 2).unwrap(),
-            FRAGMENT_SIZE as usize..FRAGMENT_SIZE as usize + 4,
+            calculate_reliable_data_range(1, 1, FRAGMENT_SIZE + 4, 2),
+            LengthRange::new(FRAGMENT_SIZE, 4),
             "tailing chunks should not take an entire fragment"
         );
         assert_eq!(
-            calculate_reliable_data_range(0, 1, FRAGMENT_SIZE + 4, 2).unwrap(),
-            0..FRAGMENT_SIZE as usize,
+            calculate_reliable_data_range(0, 1, FRAGMENT_SIZE + 4, 2),
+            LengthRange::new(0, FRAGMENT_SIZE),
             "beginning chunks should take an entire fragment"
         );
     }

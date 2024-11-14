@@ -81,18 +81,23 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    let message =
-                        if let Some(destination_server) = { self.quickplay.find_server().await } {
-                            Message::StringCmd(MessageStringCmd {
-                                command: format!("echo {}", destination_server),
-                            })
-                        } else {
-                            Message::Disconnect(MessageDisconnect {
-                                reason: "No matches found with selected filter".to_string(),
-                            })
-                        };
+                    // let message =
+                    //     if let Some(destination_server) = { self.quickplay.find_server().await } {
+                    //         Message::StringCmd(MessageStringCmd {
+                    //             command: format!("redirect {}", destination_server),
+                    //         })
+                    //     } else {
+                    //         Message::Disconnect(MessageDisconnect {
+                    //             reason: "No matches found with selected filter".to_string(),
+                    //         })
+                    //     };
 
-                    self.netchan.queue_reliable_messages(&[message])?;
+                    for i in 0..10 {
+                        let message = Message::Print(net::message::MessagePrint {
+                            text: format!("Hi World {i}"),
+                        });
+                        self.netchan.queue_reliable_messages(&[message])?;
+                    }
                 }
                 Message::SetConVars(message) => {
                     if let Err(error_message) = self
