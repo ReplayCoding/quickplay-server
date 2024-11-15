@@ -15,15 +15,11 @@ pub enum CompressionError {
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
-    let compression_type = data
-        .get(0..4)
-        .ok_or(CompressionError::NoCompressionType)?;
+    let compression_type = data.get(0..4).ok_or(CompressionError::NoCompressionType)?;
 
     match compression_type {
         COMPRESSION_SNAPPY => {
-            let compressed_data = data
-                .get(4..)
-                .ok_or(CompressionError::NoCompressedData)?;
+            let compressed_data = data.get(4..).ok_or(CompressionError::NoCompressedData)?;
 
             let mut decoder = snap::raw::Decoder::new();
             decoder

@@ -403,7 +403,7 @@ impl Subchannel {
                     } => {
                         writer.write_bit(true)?;
                         writer.write_out::<32, _>(*transfer_id)?;
-                        io_util::write_string(writer, &filename)?;
+                        io_util::write_string(writer, filename)?;
                     }
                 }
 
@@ -1331,7 +1331,7 @@ mod tests {
         assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
         assert_eq!(transfer.size, 1234);
         assert_eq!(transfer.uncompressed_size, Some(5678));
-        assert_eq!(transfer.multi_block, false);
+        assert!(!transfer.multi_block);
     }
 
     #[test]
@@ -1357,7 +1357,7 @@ mod tests {
         assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
         assert_eq!(transfer.size, 1234);
         assert_eq!(transfer.uncompressed_size, Some(5678));
-        assert_eq!(transfer.multi_block, true);
+        assert!(transfer.multi_block);
         assert_eq!(
             transfer.transfer_type,
             TransferType::File {

@@ -26,12 +26,12 @@ pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> io::Result<Stri
         }
     }
 
-    Ok(String::from_utf8(data).map_err(|_| {
+    String::from_utf8(data).map_err(|_| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "stream did not contain valid UTF-8",
         )
-    })?)
+    })
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
