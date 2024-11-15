@@ -284,7 +284,7 @@ impl Subchannel {
             let start_fragment = transfer.sent_fragments();
             let num_fragments = (transfer.total_fragments() - transfer.sent_fragments())
                 .min(budget) // don't send more fragments than we have budget for
-                .min(1 << SUBCHANNEL_FRAGMENT_COUNT_BITS); // don't try to fill more fragments than can sucessfully written
+                .min((1 << SUBCHANNEL_FRAGMENT_COUNT_BITS) - 1); // don't try to fill more fragments than can sucessfully written
 
             trace!(
                 "filled subchannel with fragments. start {start_fragment}, length {num_fragments}"
