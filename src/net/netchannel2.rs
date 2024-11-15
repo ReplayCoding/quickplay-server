@@ -671,7 +671,7 @@ fn calculate_reliable_data_range(
     LengthRange::new(start_offset, length)
 }
 
-/// Pad `number`` to be on a `boundary` byte boundary.  For example,
+/// Pad `number` to be on a `boundary` byte boundary.  For example,
 /// `pad_number(0, 4)` returns `0`, and `pad_number(1, 4)` returns 4.
 fn pad_number(number: u32, boundary: u32) -> u32 {
     (number + (boundary - 1)) / boundary * boundary
@@ -1131,7 +1131,7 @@ fn read_messages(
         // possible for padding to be exactly 6 bits.
         match reader.read_in::<{ super::message::NETMSG_TYPE_BITS }, u32>() {
             Ok(message_type) => {
-                let message = Message::read(reader, message_type).unwrap();
+                let message = Message::read(reader, message_type)?;
                 messages.push(message);
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,

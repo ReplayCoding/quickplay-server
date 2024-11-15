@@ -9,7 +9,7 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
-use net::message::{Message, MessageDisconnect, MessageStringCmd};
+use net::message::{Message, MessageDisconnect};
 use net::netchannel2::NetChannel2;
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
