@@ -33,8 +33,6 @@ struct Connection {
 
     quickplay: QuickplaySession,
 
-    balls: bool,
-
     configuration: &'static Configuration,
 }
 
@@ -58,7 +56,6 @@ impl Connection {
             cancel_token: cancel_token.clone(),
 
             quickplay: QuickplaySession::new(quickplay, configuration),
-            balls: false,
 
             configuration,
         };
@@ -98,6 +95,15 @@ impl Connection {
                         });
                         self.netchan.queue_reliable_messages(&[message])?;
                     }
+
+                    self.netchan.queue_reliable_transfer(
+                        net::netchannel2::StreamType::File,
+                        net::netchannel2::TransferType::File {
+                            transfer_id: 20,
+                            filename: "piss.txt".to_string(),
+                        },
+                        std::fs::read("/home/user/Projects/tf2_stuff/server/archive.zip").unwrap(),
+                    )?;
                 }
                 Message::SetConVars(message) => {
                     if let Err(error_message) = self
@@ -139,24 +145,7 @@ impl Connection {
                 Err(TryRecvError::Disconnected) | Err(TryRecvError::Empty) => {}
             }
 
-            // allow the netchannel to send remaining reliable data
-            let messages: &[Message] = if !self.balls {
-                self.balls = true;
-                &[
-                    Message::Print(net::message::MessagePrint {
-                        text: "AAPSODKAPODKSPOKPKOSPOKDAPOSK🐸✨\n".to_string().repeat(2),
-                    }),
-                    Message::File(net::message::MessageFile {
-                        mode: net::message::MessageFileMode::Request,
-                        filename: "tf2_playerstats.dmx".to_string(),
-                        transfer_id: 12,
-                    }),
-                ]
-            } else {
-                &[]
-            };
-
-            match self.netchan.write_packet(messages) {
+            match self.netchan.write_packet(&[]) {
                 Ok(data) => {
                     if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
                         warn!("error occured while sending outgoing data: {:?}", err);
