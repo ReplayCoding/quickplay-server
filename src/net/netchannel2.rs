@@ -105,7 +105,7 @@ const MAX_FILE_SIZE: u32 = (1 << MAX_FILE_SIZE_BITS) - 1;
 const PATH_OSMAX: usize = 260;
 
 #[derive(Debug, PartialEq, Eq)]
-enum TransferType {
+pub enum TransferType {
     Message,
     File { transfer_id: u32, filename: String },
 }
@@ -1057,7 +1057,7 @@ impl NetChannel2 {
     }
 
     /// Queue a reliable transfer to be sent.
-    fn queue_reliable_transfer(
+    pub fn queue_reliable_transfer(
         &mut self,
         stream: StreamType,
         transfer_type: TransferType,
