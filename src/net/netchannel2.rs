@@ -15,7 +15,7 @@ use tracing::trace;
 #[derive(Error, Debug)]
 pub enum NetChannelError {
     #[error("io error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("invalid checksum, expected {expected:04x}, got {actual:04x}")]
     InvalidChecksum { expected: u16, actual: u16 },
     #[error("mismatched challenge, expected {expected:08x}, got {actual:08x}")]
@@ -38,12 +38,6 @@ pub enum NetChannelError {
     Compression(CompressionError),
     #[error("invalid reliable state")]
     InvalidReliableState,
-}
-
-impl From<std::io::Error> for NetChannelError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
-    }
 }
 
 bitflags! {
