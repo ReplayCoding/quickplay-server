@@ -10,7 +10,7 @@ use std::{
 use argh::FromArgs;
 use configuration::Configuration;
 use net::message::{Message, MessageDisconnect};
-use net::netchannel2::NetChannel2;
+use net::netchannel::NetChannel;
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
@@ -28,7 +28,7 @@ struct Connection {
     socket: Arc<UdpSocket>,
     client_addr: SocketAddr,
     packet_receiver: UnboundedReceiver<Vec<u8>>,
-    netchan: NetChannel2,
+    netchan: NetChannel,
     cancel_token: CancellationToken,
 
     quickplay: QuickplaySession,
@@ -40,7 +40,7 @@ impl Connection {
     fn new(
         socket: Arc<UdpSocket>,
         client_addr: SocketAddr,
-        netchan: NetChannel2,
+        netchan: NetChannel,
         quickplay: Arc<QuickplayGlobal>,
         configuration: &'static Configuration,
     ) -> (CancellationToken, UnboundedSender<Vec<u8>>) {
@@ -97,8 +97,8 @@ impl Connection {
                     }
 
                     self.netchan.queue_reliable_transfer(
-                        net::netchannel2::StreamType::File,
-                        net::netchannel2::TransferType::File {
+                        net::netchannel::StreamType::File,
+                        net::netchannel::TransferType::File {
                             transfer_id: 20,
                             filename: "piss.txt".to_string(),
                         },
@@ -235,7 +235,7 @@ impl Server {
         let connection = Connection::new(
             self.socket.clone(),
             from,
-            NetChannel2::new(challenge),
+            NetChannel::new(challenge),
             self.quickplay.clone(),
             self.configuration,
         );

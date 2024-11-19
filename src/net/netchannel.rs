@@ -676,7 +676,7 @@ fn bytes_to_fragments(bytes: u32) -> u32 {
 }
 
 /// Implementation of Source Engine NetChannels
-pub struct NetChannel2 {
+pub struct NetChannel {
     /// Challenge number to validate packets with.
     challenge: u32,
     /// Has a challenge number been received before?
@@ -709,7 +709,7 @@ const FLAGS_OFFSET: usize = 8;
 /// Offset of the checksum in a packet.
 const CHECKSUM_OFFSET: usize = 9;
 
-impl NetChannel2 {
+impl NetChannel {
     /// Create a new netchannel.
     pub fn new(challenge: u32) -> Self {
         Self {
