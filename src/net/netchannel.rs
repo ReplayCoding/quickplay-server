@@ -96,6 +96,33 @@ impl<T> PerStream<T> {
     }
 }
 
+/// A range that stores length, instead of the end of the range.
+#[derive(PartialEq, Debug, Clone, Copy)]
+struct LengthRange<T> {
+    start: T,
+    length: T,
+}
+
+impl<T: Copy + std::ops::Add<Output = T>> LengthRange<T> {
+    fn new(start: T, length: T) -> Self {
+        Self { start, length }
+    }
+
+    fn try_cast<C>(&self) -> Result<LengthRange<C>, <C as TryFrom<T>>::Error>
+    where
+        C: TryFrom<T> + Copy + std::ops::Add<Output = C>,
+    {
+        Ok(LengthRange::new(
+            C::try_from(self.start)?,
+            C::try_from(self.length)?,
+        ))
+    }
+
+    fn into_range(self) -> Range<T> {
+        self.start..(self.start + self.length)
+    }
+}
+
 const FRAGMENT_BITS: u32 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
 
@@ -121,6 +148,7 @@ struct OutgoingReliableTransfer {
     /// Number of acknowledged fragments
     acked_fragments: u32,
 }
+
 impl OutgoingReliableTransfer {
     fn new(transfer_type: TransferType, data: Vec<u8>) -> Result<Self, NetChannelError> {
         let size: u32 = data
@@ -181,33 +209,6 @@ impl OutgoingReliableTransfer {
 
     fn mark_acked(&mut self, num_fragments: u32) {
         self.acked_fragments += num_fragments;
-    }
-}
-
-/// A range that stores length, instead of the end of the range.
-#[derive(PartialEq, Debug, Clone, Copy)]
-struct LengthRange<T> {
-    start: T,
-    length: T,
-}
-
-impl<T: Copy + std::ops::Add<Output = T>> LengthRange<T> {
-    fn new(start: T, length: T) -> Self {
-        Self { start, length }
-    }
-
-    fn try_cast<C>(&self) -> Result<LengthRange<C>, <C as TryFrom<T>>::Error>
-    where
-        C: TryFrom<T> + Copy + std::ops::Add<Output = C>,
-    {
-        Ok(LengthRange::new(
-            C::try_from(self.start)?,
-            C::try_from(self.length)?,
-        ))
-    }
-
-    fn into_range(self) -> Range<T> {
-        self.start..(self.start + self.length)
     }
 }
 
