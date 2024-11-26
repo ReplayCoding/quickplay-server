@@ -140,6 +140,9 @@ pub enum TransferType {
 struct OutgoingReliableTransfer {
     /// The data to be sent
     data: Vec<u8>,
+    /// If the data is compressed, then this contains the size of the data when
+    /// uncompressed.
+    uncompressed_size: Option<u32>,
     /// The type of the transfer
     transfer_type: TransferType,
 
@@ -151,6 +154,8 @@ struct OutgoingReliableTransfer {
 
 impl OutgoingReliableTransfer {
     fn new(transfer_type: TransferType, data: Vec<u8>) -> Result<Self, NetChannelError> {
+        let mut data = data;
+
         let size: u32 = data
             .len()
             .try_into()
@@ -159,10 +164,23 @@ impl OutgoingReliableTransfer {
             return Err(NetChannelError::TransferTooLarge);
         }
 
-        // TODO: compression
+        let mut uncompressed_size = None;
+
+        let compressed_data = compression::compress(&data).map_err(NetChannelError::Compression)?;
+        // Only send compressed if it's actually smaller.
+        if compressed_data.len() < data.len() {
+            trace!(
+                "compressed transfer: uncompressed {} compressed {}",
+                data.len(),
+                compressed_data.len()
+            );
+            data = compressed_data;
+            uncompressed_size = Some(size);
+        }
 
         Ok(Self {
             data,
+            uncompressed_size,
             transfer_type,
             sent_fragments: 0,
             acked_fragments: 0,
@@ -199,8 +217,7 @@ impl OutgoingReliableTransfer {
     }
 
     fn uncompressed_size(&self) -> Option<u32> {
-        // TODO
-        None
+        self.uncompressed_size
     }
 
     fn mark_sent(&mut self, num_fragments: u32) {
