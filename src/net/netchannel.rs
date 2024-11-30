@@ -695,6 +695,9 @@ fn bytes_to_fragments(bytes: u32) -> u32 {
 
 /// Implementation of Source Engine NetChannels
 pub struct NetChannel {
+    /// The side of the connection that this netchannel is on
+    side: MessageSide,
+
     /// Challenge number to validate packets with.
     challenge: u32,
     /// Has a challenge number been received before?
@@ -729,8 +732,10 @@ const CHECKSUM_OFFSET: usize = 9;
 
 impl NetChannel {
     /// Create a new netchannel.
-    pub fn new(challenge: u32) -> Self {
+    pub fn new(side: MessageSide, challenge: u32) -> Self {
         Self {
+            side,
+
             challenge,
             has_seen_challenge: false,
 
@@ -764,7 +769,7 @@ impl NetChannel {
         }
 
         self.read_completed_incoming_transfers(&mut messages, &mut files)?;
-        read_messages(&mut reader, MessageSide::Server, &mut messages)?;
+        read_messages(&mut reader, self.side, &mut messages)?;
 
         Ok((messages, files))
     }
@@ -952,7 +957,7 @@ impl NetChannel {
             match transfer_type {
                 TransferType::Message => {
                     let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-                    read_messages(&mut reader, MessageSide::Server, messages)?
+                    read_messages(&mut reader, self.side, messages)?
                 }
                 TransferType::File {
                     transfer_id,

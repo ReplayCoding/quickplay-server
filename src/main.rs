@@ -9,7 +9,7 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
-use net::message::{Message, MessageDisconnect};
+use net::message::{Message, MessageDisconnect, MessageSide};
 use net::netchannel::NetChannel;
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
@@ -235,7 +235,7 @@ impl Server {
         let connection = Connection::new(
             self.socket.clone(),
             from,
-            NetChannel::new(challenge),
+            NetChannel::new(MessageSide::Server, challenge),
             self.quickplay.clone(),
             self.configuration,
         );
