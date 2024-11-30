@@ -102,7 +102,7 @@ impl Connection {
                             transfer_id: 20,
                             filename: "piss.txt".to_string(),
                         },
-                        std::fs::read("/home/user/Projects/tf2_stuff/server/archive.zip").unwrap(),
+                        std::fs::read("/home/user/Projects/tf2_stuff/server/Cargo.toml").unwrap(),
                     )?;
                 }
                 Message::SetConVars(message) => {

@@ -4,7 +4,7 @@ use crate::io_util;
 
 use super::{
     compression::{self, CompressionError},
-    message::Message,
+    message::{read_messages, write_messages, Message, MessageSide},
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
@@ -764,7 +764,7 @@ impl NetChannel {
         }
 
         self.read_completed_incoming_transfers(&mut messages, &mut files)?;
-        read_messages(&mut reader, &mut messages)?;
+        read_messages(&mut reader, MessageSide::Server, &mut messages)?;
 
         Ok((messages, files))
     }
@@ -952,7 +952,7 @@ impl NetChannel {
             match transfer_type {
                 TransferType::Message => {
                     let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
-                    read_messages(&mut reader, messages)?
+                    read_messages(&mut reader, MessageSide::Server, messages)?
                 }
                 TransferType::File {
                     transfer_id,
@@ -1132,37 +1132,6 @@ fn write_checksum(packet_bytes: &mut [u8]) {
     packet_bytes[CHECKSUM_OFFSET + 1] = checksum_bytes[1];
 }
 
-/// Read all remaining messages from a bitstream. Any messages that are read
-/// will be appended to `messages`.
-fn read_messages(
-    reader: &mut impl BitRead,
-    messages: &mut Vec<Message>,
-) -> Result<(), NetChannelError> {
-    loop {
-        // I'm not entirely sure if this is correct, since it *might* be
-        // possible for padding to be exactly 6 bits.
-        match reader.read_in::<{ super::message::NETMSG_TYPE_BITS }, u32>() {
-            Ok(message_type) => {
-                let message = Message::read(reader, message_type)?;
-                messages.push(message);
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-            Err(e) => return Err(e.into()),
-        }
-    }
-
-    Ok(())
-}
-
-/// Write all messages in `messages` to `writer`.
-fn write_messages(writer: &mut impl BitWrite, messages: &[Message]) -> Result<(), NetChannelError> {
-    for message in messages {
-        message.write(writer)?
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use io_util::{write_string, write_varint32};
@@ -1286,49 +1255,6 @@ mod tests {
         );
 
         assert_eq!(EXPECTED_CHECKSUM, written_checksum);
-    }
-
-    #[test]
-    fn test_read_messages_single() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
-        let expected_message = Message::Print(crate::net::message::MessagePrint {
-            text: "test string yay".to_string(),
-        });
-
-        expected_message.write(&mut writer).unwrap();
-
-        writer.byte_align().unwrap();
-
-        let mut reader =
-            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
-        let mut messages = vec![];
-        read_messages(&mut reader, &mut messages).unwrap();
-
-        assert_eq!(messages, &[expected_message]);
-    }
-
-    #[test]
-    fn test_messages_roundtrip() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
-        let expected_messages = &[
-            Message::Print(crate::net::message::MessagePrint {
-                text: "test string yay".to_string(),
-            }),
-            Message::Disconnect(crate::net::message::MessageDisconnect {
-                reason: "disconnect message (sad)".to_string(),
-            }),
-        ];
-
-        write_messages(&mut writer, expected_messages).unwrap();
-
-        writer.byte_align().unwrap();
-
-        let mut reader =
-            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
-        let mut messages = vec![];
-        read_messages(&mut reader, &mut messages).unwrap();
-
-        assert_eq!(messages, expected_messages);
     }
 
     #[test]
