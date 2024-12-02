@@ -10,22 +10,23 @@ pub enum MessageSide {
 }
 
 impl MessageSide {
-    pub fn can_receive(&self, other: Self) -> bool {
+    pub fn can_receive(&self, receiving_side: Self) -> bool {
         if *self == MessageSide::Any {
             return true;
         }
 
-        // Client can receive messages from Server
-        *self != other
+        // a client can receive messages from the server, but not from a client
+        *self != receiving_side
     }
 }
 
-/// A single message.
+/// A single generic message.
 pub(super) trait Message {
     /// This is used to identify the message. It may collide with other
     /// messages, as long as those messages cannot be receieved from the same
     /// side.
     const TYPE: u8;
+    /// The side of the connection that this message can be **sent** from
     const SIDE: MessageSide;
 
     /// Hack to allow macros to access the message type
