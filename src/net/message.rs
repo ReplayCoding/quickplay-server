@@ -10,13 +10,12 @@ pub enum MessageSide {
     Client,
     Server,
 
-    /// DO NOT USE OUTSIDE OF MessageTrait.
-    Both,
+    Any,
 }
 
 impl MessageSide {
     fn can_receive(&self, other: Self) -> bool {
-        if *self == MessageSide::Both {
+        if *self == MessageSide::Any {
             return true;
         }
 
@@ -25,17 +24,16 @@ impl MessageSide {
     }
 }
 
-/// A single netmessage. This roughly corresponds to CNetMessage in the official
-/// implementation. (terrible name i know)
-trait MessageTrait {
+/// A single message.
+trait Message {
     /// This is the message type, sent before the actual message is written. It
     /// may collide with other messages, as long as those messages do not share
-    /// the same side (or Both). The type must fit into NETMSG_TYPE_BITS bits.
-    const TYPE: u32;
+    /// the same side (or Both).
+    const TYPE: u8;
     const SIDE: MessageSide;
 
     /// Hack to allow macros to access the message type
-    fn get_type(&self) -> u32 {
+    fn get_type_(&self) -> u8 {
         Self::TYPE
     }
 
@@ -48,9 +46,9 @@ trait MessageTrait {
 #[derive(Debug, PartialEq, Eq)]
 pub struct MessageNop;
 
-impl MessageTrait for MessageNop {
-    const TYPE: u32 = 0;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageNop {
+    const TYPE: u8 = 0;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -69,9 +67,9 @@ pub struct MessageDisconnect {
     pub reason: String,
 }
 
-impl MessageTrait for MessageDisconnect {
-    const TYPE: u32 = 1;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageDisconnect {
+    const TYPE: u8 = 1;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -95,9 +93,9 @@ pub struct MessageStringCmd {
     pub command: String,
 }
 
-impl MessageTrait for MessageStringCmd {
-    const TYPE: u32 = 4;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageStringCmd {
+    const TYPE: u8 = 4;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -118,9 +116,9 @@ pub struct MessageSetConVars {
     pub convars: Vec<(String, String)>,
 }
 
-impl MessageTrait for MessageSetConVars {
-    const TYPE: u32 = 5;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageSetConVars {
+    const TYPE: u8 = 5;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -147,9 +145,9 @@ pub struct MessageSignonState {
     pub spawn_count: i32,
 }
 
-impl MessageTrait for MessageSignonState {
-    const TYPE: u32 = 6;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageSignonState {
+    const TYPE: u8 = 6;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -174,8 +172,8 @@ pub struct MessagePrint {
     pub text: String,
 }
 
-impl MessageTrait for MessagePrint {
-    const TYPE: u32 = 7;
+impl Message for MessagePrint {
+    const TYPE: u8 = 7;
     const SIDE: MessageSide = MessageSide::Server;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
@@ -204,9 +202,9 @@ pub struct MessageFile {
     pub transfer_id: u32,
 }
 
-impl MessageTrait for MessageFile {
-    const TYPE: u32 = 2;
-    const SIDE: MessageSide = MessageSide::Both;
+impl Message for MessageFile {
+    const TYPE: u8 = 2;
+    const SIDE: MessageSide = MessageSide::Any;
 
     fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
     where
@@ -249,7 +247,7 @@ macro_rules! write_messages_match {
     ($writer:ident, $message:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message {
             $(crate::net::message::NetMessage::$discriminant(message) => {
-                $writer.write_out::<{ NETMSG_TYPE_BITS }, u32>(message.get_type())?;
+                $writer.write_out::<{ NETMSG_TYPE_BITS }, _>(message.get_type_())?;
                 message.write($writer)?;
             },)*
         }
@@ -266,7 +264,7 @@ pub fn read_messages(
     loop {
         // I'm not entirely sure if this is correct, since it *might* be
         // possible for padding to be exactly 6 bits.
-        match reader.read_in::<{ NETMSG_TYPE_BITS }, u32>() {
+        match reader.read_in::<{ NETMSG_TYPE_BITS }, u8>() {
             Ok(message_type) => {
                 let message = read_messages_match!(reader, side, message_type,
                     MessageNop         => Nop,
