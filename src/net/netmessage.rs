@@ -236,7 +236,7 @@ pub enum NetMessage {
 macro_rules! read_messages_match {
     ($reader:ident, $side:ident, $message_type:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message_type {
-            $($struct::TYPE if $struct::SIDE.can_receive($side) => crate::net::message::NetMessage::$discriminant($struct::read($reader)?),)*
+            $($struct::TYPE if $struct::SIDE.can_receive($side) => NetMessage::$discriminant($struct::read($reader)?),)*
             _ => todo!("unimplemented message type {} for side {:?}", $message_type, $side)
         }
     };
@@ -246,7 +246,7 @@ macro_rules! read_messages_match {
 macro_rules! write_messages_match {
     ($writer:ident, $message:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message {
-            $(crate::net::message::NetMessage::$discriminant(message) => {
+            $(NetMessage::$discriminant(message) => {
                 $writer.write_out::<{ NETMSG_TYPE_BITS }, _>(message.get_type_())?;
                 message.write($writer)?;
             },)*
@@ -332,10 +332,10 @@ mod tests {
     fn test_messages_roundtrip() {
         let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
         let expected_messages = &[
-            NetMessage::Print(crate::net::message::MessagePrint {
+            NetMessage::Print(crate::net::netmessage::MessagePrint {
                 text: "test string yay".to_string(),
             }),
-            NetMessage::Disconnect(crate::net::message::MessageDisconnect {
+            NetMessage::Disconnect(crate::net::netmessage::MessageDisconnect {
                 reason: "disconnect message (sad)".to_string(),
             }),
         ];

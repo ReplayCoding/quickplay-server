@@ -9,8 +9,8 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
-use net::message::{NetMessage, MessageDisconnect, MessageSide};
 use net::netchannel::NetChannel;
+use net::netmessage::{MessageDisconnect, MessageSide, NetMessage};
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
@@ -90,7 +90,7 @@ impl Connection {
                     //     };
 
                     for i in 0..10 {
-                        let message = NetMessage::Print(net::message::MessagePrint {
+                        let message = NetMessage::Print(net::netmessage::MessagePrint {
                             text: format!("Hi World {i}"),
                         });
                         self.netchan.queue_reliable_messages(&[message])?;
@@ -110,11 +110,12 @@ impl Connection {
                         .quickplay
                         .update_preferences_from_convars(&message.convars)
                     {
-                        self.netchan.queue_reliable_messages(&[NetMessage::Disconnect(
-                            MessageDisconnect {
-                                reason: error_message,
-                            },
-                        )])?;
+                        self.netchan
+                            .queue_reliable_messages(&[NetMessage::Disconnect(
+                                MessageDisconnect {
+                                    reason: error_message,
+                                },
+                            )])?;
                     };
                 }
 

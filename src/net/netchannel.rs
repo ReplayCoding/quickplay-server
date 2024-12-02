@@ -4,7 +4,7 @@ use crate::io_util;
 
 use super::{
     compression::{self, CompressionError},
-    message::{read_messages, write_messages, NetMessage, MessageSide},
+    netmessage::{read_messages, write_messages, MessageSide, NetMessage},
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
@@ -1067,7 +1067,10 @@ impl NetChannel {
     }
 
     /// Queue reliable messages to be sent.
-    pub fn queue_reliable_messages(&mut self, messages: &[NetMessage]) -> Result<(), NetChannelError> {
+    pub fn queue_reliable_messages(
+        &mut self,
+        messages: &[NetMessage],
+    ) -> Result<(), NetChannelError> {
         let mut data = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut data), LittleEndian);
 
