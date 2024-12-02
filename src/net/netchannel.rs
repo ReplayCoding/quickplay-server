@@ -4,7 +4,7 @@ use crate::io_util;
 
 use super::{
     compression::{self, CompressionError},
-    message::{read_messages, write_messages, Message, MessageSide},
+    message::{read_messages, write_messages, NetMessage, MessageSide},
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
@@ -758,7 +758,7 @@ impl NetChannel {
     pub fn read_packet(
         &mut self,
         packet: &[u8],
-    ) -> Result<(Vec<Message>, Vec<ReceivedFile>), NetChannelError> {
+    ) -> Result<(Vec<NetMessage>, Vec<ReceivedFile>), NetChannelError> {
         let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
         let mut messages = vec![];
         let mut files = vec![];
@@ -936,7 +936,7 @@ impl NetChannel {
     /// Read any completed reliable message transfers.
     fn read_completed_incoming_transfers(
         &mut self,
-        messages: &mut Vec<Message>,
+        messages: &mut Vec<NetMessage>,
         files: &mut Vec<ReceivedFile>,
     ) -> Result<(), NetChannelError> {
         for stream in StreamType::iter() {
@@ -974,7 +974,7 @@ impl NetChannel {
 
     /// Write a single packet. Any messages in `messages` will be sent as
     /// unreliable messages in the packet.
-    pub fn write_packet(&mut self, messages: &[Message]) -> Result<Vec<u8>, NetChannelError> {
+    pub fn write_packet(&mut self, messages: &[NetMessage]) -> Result<Vec<u8>, NetChannelError> {
         let mut writer = BitWriter::endian(Cursor::new(Vec::<u8>::new()), LittleEndian);
         let mut flags = self.write_header(&mut writer)?;
 
@@ -1067,7 +1067,7 @@ impl NetChannel {
     }
 
     /// Queue reliable messages to be sent.
-    pub fn queue_reliable_messages(&mut self, messages: &[Message]) -> Result<(), NetChannelError> {
+    pub fn queue_reliable_messages(&mut self, messages: &[NetMessage]) -> Result<(), NetChannelError> {
         let mut data = vec![];
         let mut writer = BitWriter::endian(Cursor::new(&mut data), LittleEndian);
 

@@ -9,7 +9,7 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
-use net::message::{Message, MessageDisconnect, MessageSide};
+use net::message::{NetMessage, MessageDisconnect, MessageSide};
 use net::netchannel::NetChannel;
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
@@ -71,8 +71,8 @@ impl Connection {
         for message in messages {
             trace!("got message {:?}", message);
             match message {
-                Message::Disconnect(_) => self.cancel_token.cancel(),
-                Message::SignonState(message) => {
+                NetMessage::Disconnect(_) => self.cancel_token.cancel(),
+                NetMessage::SignonState(message) => {
                     // SIGNONSTATE_CONNECTED = 2
                     if message.signon_state != 2 {
                         debug!("unexpected signon state {}", message.signon_state);
@@ -90,7 +90,7 @@ impl Connection {
                     //     };
 
                     for i in 0..10 {
-                        let message = Message::Print(net::message::MessagePrint {
+                        let message = NetMessage::Print(net::message::MessagePrint {
                             text: format!("Hi World {i}"),
                         });
                         self.netchan.queue_reliable_messages(&[message])?;
@@ -105,12 +105,12 @@ impl Connection {
                         std::fs::read("/home/user/Projects/tf2_stuff/server/Cargo.toml").unwrap(),
                     )?;
                 }
-                Message::SetConVars(message) => {
+                NetMessage::SetConVars(message) => {
                     if let Err(error_message) = self
                         .quickplay
                         .update_preferences_from_convars(&message.convars)
                     {
-                        self.netchan.queue_reliable_messages(&[Message::Disconnect(
+                        self.netchan.queue_reliable_messages(&[NetMessage::Disconnect(
                             MessageDisconnect {
                                 reason: error_message,
                             },

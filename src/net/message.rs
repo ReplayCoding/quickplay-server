@@ -224,7 +224,7 @@ impl MessageTrait for MessageFile {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum Message {
+pub enum NetMessage {
     Nop(MessageNop),
     Disconnect(MessageDisconnect),
     StringCmd(MessageStringCmd),
@@ -238,7 +238,7 @@ pub enum Message {
 macro_rules! read_messages_match {
     ($reader:ident, $side:ident, $message_type:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message_type {
-            $($struct::TYPE if $struct::SIDE.can_receive($side) => crate::net::message::Message::$discriminant($struct::read($reader)?),)*
+            $($struct::TYPE if $struct::SIDE.can_receive($side) => crate::net::message::NetMessage::$discriminant($struct::read($reader)?),)*
             _ => todo!("unimplemented message type {} for side {:?}", $message_type, $side)
         }
     };
@@ -248,7 +248,7 @@ macro_rules! read_messages_match {
 macro_rules! write_messages_match {
     ($writer:ident, $message:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message {
-            $(crate::net::message::Message::$discriminant(message) => {
+            $(crate::net::message::NetMessage::$discriminant(message) => {
                 $writer.write_out::<{ NETMSG_TYPE_BITS }, u32>(message.get_type())?;
                 message.write($writer)?;
             },)*
@@ -261,7 +261,7 @@ macro_rules! write_messages_match {
 pub fn read_messages(
     reader: &mut impl BitRead,
     side: MessageSide,
-    messages: &mut Vec<Message>,
+    messages: &mut Vec<NetMessage>,
 ) -> Result<(), std::io::Error> {
     loop {
         // I'm not entirely sure if this is correct, since it *might* be
@@ -288,7 +288,7 @@ pub fn read_messages(
 }
 
 /// Write all messages in `messages` to `writer`.
-pub fn write_messages(writer: &mut impl BitWrite, messages: &[Message]) -> std::io::Result<()> {
+pub fn write_messages(writer: &mut impl BitWrite, messages: &[NetMessage]) -> std::io::Result<()> {
     for message in messages {
         write_messages_match!(writer, message,
             MessageNop         => Nop,
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn test_read_messages_single() {
         let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
-        let expected_message = &[Message::Print(MessagePrint {
+        let expected_message = &[NetMessage::Print(MessagePrint {
             text: "test string yay".to_string(),
         })];
 
@@ -334,10 +334,10 @@ mod tests {
     fn test_messages_roundtrip() {
         let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
         let expected_messages = &[
-            Message::Print(crate::net::message::MessagePrint {
+            NetMessage::Print(crate::net::message::MessagePrint {
                 text: "test string yay".to_string(),
             }),
-            Message::Disconnect(crate::net::message::MessageDisconnect {
+            NetMessage::Disconnect(crate::net::message::MessageDisconnect {
                 reason: "disconnect message (sad)".to_string(),
             }),
         ];
