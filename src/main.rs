@@ -11,7 +11,7 @@ use argh::FromArgs;
 use configuration::Configuration;
 use net::message::MessageSide;
 use net::netchannel::NetChannel;
-use net::netmessage::{Disconnect, NetMessage};
+use net::netmessage::{Disconnect, NetMessage, StringCmd};
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
@@ -79,32 +79,17 @@ impl Connection {
                         debug!("unexpected signon state {}", message.signon_state);
                     }
 
-                    // let message =
-                    //     if let Some(destination_server) = { self.quickplay.find_server().await } {
-                    //         Message::StringCmd(MessageStringCmd {
-                    //             command: format!("redirect {}", destination_server),
-                    //         })
-                    //     } else {
-                    //         Message::Disconnect(MessageDisconnect {
-                    //             reason: "No matches found with selected filter".to_string(),
-                    //         })
-                    //     };
-
-                    for i in 0..10 {
-                        let message = NetMessage::Print(net::netmessage::Print {
-                            text: format!("Hi World {i}"),
-                        });
-                        self.netchan.queue_reliable_messages(&[message])?;
-                    }
-
-                    self.netchan.queue_reliable_transfer(
-                        net::netchannel::StreamType::File,
-                        net::netchannel::TransferType::File {
-                            transfer_id: 20,
-                            filename: "piss.txt".to_string(),
-                        },
-                        std::fs::read("/home/user/Projects/tf2_stuff/server/Cargo.toml").unwrap(),
-                    )?;
+                    let message =
+                        if let Some(destination_server) = { self.quickplay.find_server().await } {
+                            NetMessage::StringCmd(StringCmd {
+                                command: format!("redirect {}", destination_server),
+                            })
+                        } else {
+                            NetMessage::Disconnect(Disconnect {
+                                reason: "No matches found with selected filter".to_string(),
+                            })
+                        };
+                    self.netchan.queue_reliable_messages(&[message])?;
                 }
                 NetMessage::SetConVars(message) => {
                     if let Err(error_message) = self
@@ -112,11 +97,9 @@ impl Connection {
                         .update_preferences_from_convars(&message.convars)
                     {
                         self.netchan
-                            .queue_reliable_messages(&[NetMessage::Disconnect(
-                                Disconnect {
-                                    reason: error_message,
-                                },
-                            )])?;
+                            .queue_reliable_messages(&[NetMessage::Disconnect(Disconnect {
+                                reason: error_message,
+                            })])?;
                     };
                 }
 
