@@ -11,7 +11,7 @@ use argh::FromArgs;
 use configuration::Configuration;
 use net::message::MessageSide;
 use net::netchannel::NetChannel;
-use net::netmessage::{MessageDisconnect, NetMessage};
+use net::netmessage::{Disconnect, NetMessage};
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
@@ -91,7 +91,7 @@ impl Connection {
                     //     };
 
                     for i in 0..10 {
-                        let message = NetMessage::Print(net::netmessage::MessagePrint {
+                        let message = NetMessage::Print(net::netmessage::Print {
                             text: format!("Hi World {i}"),
                         });
                         self.netchan.queue_reliable_messages(&[message])?;
@@ -113,7 +113,7 @@ impl Connection {
                     {
                         self.netchan
                             .queue_reliable_messages(&[NetMessage::Disconnect(
-                                MessageDisconnect {
+                                Disconnect {
                                     reason: error_message,
                                 },
                             )])?;

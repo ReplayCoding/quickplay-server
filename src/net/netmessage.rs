@@ -7,9 +7,9 @@ use super::message::{Message, MessageSide};
 pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageNop;
+pub struct Nop;
 
-impl Message for MessageNop {
+impl Message for Nop {
     const TYPE: u8 = 0;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -26,11 +26,11 @@ impl Message for MessageNop {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageDisconnect {
+pub struct Disconnect {
     pub reason: String,
 }
 
-impl Message for MessageDisconnect {
+impl Message for Disconnect {
     const TYPE: u8 = 1;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -52,11 +52,11 @@ impl Message for MessageDisconnect {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageStringCmd {
+pub struct StringCmd {
     pub command: String,
 }
 
-impl Message for MessageStringCmd {
+impl Message for StringCmd {
     const TYPE: u8 = 4;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -75,11 +75,11 @@ impl Message for MessageStringCmd {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageSetConVars {
+pub struct SetConVars {
     pub convars: Vec<(String, String)>,
 }
 
-impl Message for MessageSetConVars {
+impl Message for SetConVars {
     const TYPE: u8 = 5;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -103,12 +103,12 @@ impl Message for MessageSetConVars {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageSignonState {
+pub struct SignonState {
     pub signon_state: u8,
     pub spawn_count: i32,
 }
 
-impl Message for MessageSignonState {
+impl Message for SignonState {
     const TYPE: u8 = 6;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -131,11 +131,11 @@ impl Message for MessageSignonState {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessagePrint {
+pub struct Print {
     pub text: String,
 }
 
-impl Message for MessagePrint {
+impl Message for Print {
     const TYPE: u8 = 7;
     const SIDE: MessageSide = MessageSide::Server;
 
@@ -154,18 +154,18 @@ impl Message for MessagePrint {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum MessageFileMode {
+pub enum FileMode {
     Request,
     Deny,
 }
 #[derive(Debug, PartialEq, Eq)]
-pub struct MessageFile {
-    pub mode: MessageFileMode,
+pub struct File {
+    pub mode: FileMode,
     pub filename: String,
     pub transfer_id: u32,
 }
 
-impl Message for MessageFile {
+impl Message for File {
     const TYPE: u8 = 2;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -179,20 +179,20 @@ impl Message for MessageFile {
     fn write(&self, writer: &mut impl BitWrite) -> std::io::Result<()> {
         writer.write_out::<32, u32>(self.transfer_id)?;
         write_string(writer, &self.filename)?;
-        writer.write_bit(self.mode == MessageFileMode::Request)?;
+        writer.write_bit(self.mode == FileMode::Request)?;
         Ok(())
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum NetMessage {
-    Nop(MessageNop),
-    Disconnect(MessageDisconnect),
-    StringCmd(MessageStringCmd),
-    SetConVars(MessageSetConVars),
-    SignonState(MessageSignonState),
-    Print(MessagePrint),
-    File(MessageFile),
+    Nop(Nop),
+    Disconnect(Disconnect),
+    StringCmd(StringCmd),
+    SetConVars(SetConVars),
+    SignonState(SignonState),
+    Print(Print),
+    File(File),
 }
 
 /// Helper to generate the match statement for reading messages
@@ -230,13 +230,13 @@ pub fn read_messages(
         match reader.read_in::<{ NETMSG_TYPE_BITS }, u8>() {
             Ok(message_type) => {
                 let message = read_messages_match!(reader, side, message_type,
-                    MessageNop         => Nop,
-                    MessageDisconnect  => Disconnect,
-                    MessageStringCmd   => StringCmd,
-                    MessageSetConVars  => SetConVars,
-                    MessageSignonState => SignonState,
-                    MessagePrint       => Print,
-                    MessageFile        => File);
+                    Nop         => Nop,
+                    Disconnect  => Disconnect,
+                    StringCmd   => StringCmd,
+                    SetConVars  => SetConVars,
+                    SignonState => SignonState,
+                    Print       => Print,
+                    File        => File);
 
                 messages.push(message);
             }
@@ -252,13 +252,13 @@ pub fn read_messages(
 pub fn write_messages(writer: &mut impl BitWrite, messages: &[NetMessage]) -> std::io::Result<()> {
     for message in messages {
         write_messages_match!(writer, message,
-            MessageNop         => Nop,
-            MessageDisconnect  => Disconnect,
-            MessageStringCmd   => StringCmd,
-            MessageSetConVars  => SetConVars,
-            MessageSignonState => SignonState,
-            MessagePrint       => Print,
-            MessageFile        => File);
+            Nop         => Nop,
+            Disconnect  => Disconnect,
+            StringCmd   => StringCmd,
+            SetConVars  => SetConVars,
+            SignonState => SignonState,
+            Print       => Print,
+            File        => File);
     }
 
     Ok(())
@@ -275,7 +275,7 @@ mod tests {
     #[test]
     fn test_read_messages_single() {
         let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
-        let expected_message = &[NetMessage::Print(MessagePrint {
+        let expected_message = &[NetMessage::Print(Print {
             text: "test string yay".to_string(),
         })];
 
@@ -295,10 +295,10 @@ mod tests {
     fn test_messages_roundtrip() {
         let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
         let expected_messages = &[
-            NetMessage::Print(crate::net::netmessage::MessagePrint {
+            NetMessage::Print(crate::net::netmessage::Print {
                 text: "test string yay".to_string(),
             }),
-            NetMessage::Disconnect(crate::net::netmessage::MessageDisconnect {
+            NetMessage::Disconnect(crate::net::netmessage::Disconnect {
                 reason: "disconnect message (sad)".to_string(),
             }),
         ];
