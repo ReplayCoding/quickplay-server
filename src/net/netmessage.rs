@@ -2,46 +2,9 @@ use bitstream_io::{BitRead, BitWrite};
 
 use crate::io_util::{read_string, write_string};
 
+use super::message::{Message, MessageSide};
+
 pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
-
-/// The sides that a message may be sent from
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum MessageSide {
-    Client,
-    Server,
-
-    Any,
-}
-
-impl MessageSide {
-    fn can_receive(&self, other: Self) -> bool {
-        if *self == MessageSide::Any {
-            return true;
-        }
-
-        // Client can receive messages from Server
-        *self != other
-    }
-}
-
-/// A single message.
-trait Message {
-    /// This is the message type, sent before the actual message is written. It
-    /// may collide with other messages, as long as those messages do not share
-    /// the same side (or Both).
-    const TYPE: u8;
-    const SIDE: MessageSide;
-
-    /// Hack to allow macros to access the message type
-    fn get_type_(&self) -> u8 {
-        Self::TYPE
-    }
-
-    fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
-    where
-        Self: Sized;
-    fn write(&self, writer: &mut impl BitWrite) -> std::io::Result<()>;
-}
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct MessageNop;

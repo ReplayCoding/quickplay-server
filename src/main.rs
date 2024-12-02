@@ -9,8 +9,9 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
+use net::message::MessageSide;
 use net::netchannel::NetChannel;
-use net::netmessage::{MessageDisconnect, MessageSide, NetMessage};
+use net::netmessage::{MessageDisconnect, NetMessage};
 use net::packet::{decode_raw_packet, Packet};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;

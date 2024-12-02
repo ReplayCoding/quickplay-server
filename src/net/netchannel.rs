@@ -4,7 +4,8 @@ use crate::io_util;
 
 use super::{
     compression::{self, CompressionError},
-    netmessage::{read_messages, write_messages, MessageSide, NetMessage},
+    message::MessageSide,
+    netmessage::{read_messages, write_messages, NetMessage},
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
