@@ -20,17 +20,12 @@ pub enum ConnectionlessError {
     InvalidAuthProtocol(u32),
     #[error("steam auth key is too long: {0}")]
     SteamAuthKeyTooLong(usize),
+    #[error("invalid magic version: {0}")]
+    InvalidMagicVersion(u32),
+    #[error("unknown message {}, receiving from side {1:?}", *.0 as char)]
+    UnknownMessage(u8, MessageSide),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-#[derive(Debug)]
-pub enum ConnectionlessMessage {
-    A2S_GetChallenge(A2S_GetChallenge),
-    C2S_Connect(C2S_Connect),
-    S2C_Challenge(S2C_Challenge),
-    S2C_Connection(S2C_Connection),
-    S2C_ConnReject(S2C_ConnReject),
 }
 
 #[derive(Debug)]
@@ -52,13 +47,14 @@ impl Message<ConnectionlessError> for A2S_GetChallenge {
     }
 
     fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
-        todo!()
+        writer.write_out::<32, _>(self.challenge)?;
+        Ok(())
     }
 }
 
 #[derive(Debug, EnumDiscriminants)]
 #[strum_discriminants(name(AuthProtocolType))]
-enum AuthProtocol {
+pub enum AuthProtocol {
     AuthCertificate(String),
     HashedCdKey(String),
     Steam(Vec<u8>),
@@ -66,13 +62,13 @@ enum AuthProtocol {
 
 #[derive(Debug)]
 pub struct C2S_Connect {
-    protocol_version: u32,
-    auth_protocol: AuthProtocol,
-    server_challenge: u32,
-    client_challenge: u32,
-    name: String,
-    password: String,
-    product_version: String,
+    pub protocol_version: u32,
+    pub auth_protocol: AuthProtocol,
+    pub server_challenge: u32,
+    pub client_challenge: u32,
+    pub name: String,
+    pub password: String,
+    pub product_version: String,
 }
 
 impl Message<ConnectionlessError> for C2S_Connect {
@@ -121,7 +117,33 @@ impl Message<ConnectionlessError> for C2S_Connect {
     }
 
     fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
-        todo!()
+        writer.write_out::<32, _>(self.protocol_version)?;
+        writer.write_out::<32, u32>(match self.auth_protocol {
+            AuthProtocol::AuthCertificate(_) => 1,
+            AuthProtocol::HashedCdKey(_) => 2,
+            AuthProtocol::Steam(_) => 3,
+        })?;
+        writer.write_out::<32, _>(self.server_challenge)?;
+        writer.write_out::<32, _>(self.client_challenge)?;
+        write_string(writer, &self.name)?;
+        write_string(writer, &self.password)?;
+        write_string(writer, &self.product_version)?;
+
+        match &self.auth_protocol {
+            AuthProtocol::AuthCertificate(_) => todo!(),
+            AuthProtocol::HashedCdKey(_) => todo!(),
+            AuthProtocol::Steam(key) => {
+                if key.len() > 2048 {
+                    return Err(ConnectionlessError::SteamAuthKeyTooLong(key.len()));
+                };
+
+                // u16::MAX > 2048
+                writer.write_out::<16, _>(key.len() as u16)?;
+                writer.write_bytes(&key)?;
+            }
+        };
+
+        Ok(())
     }
 }
 
@@ -132,6 +154,8 @@ pub struct S2C_Challenge {
     auth_protocol: AuthProtocolType,
 }
 
+const S2C_MAGICVERSION: u32 = 0x5a4f_4933;
+
 impl Message<ConnectionlessError> for S2C_Challenge {
     const TYPE: u8 = b'A';
 
@@ -141,11 +165,29 @@ impl Message<ConnectionlessError> for S2C_Challenge {
     where
         Self: Sized,
     {
-        todo!()
+        let magic_version = reader.read_in::<32, u32>()?;
+        if magic_version != S2C_MAGICVERSION {
+            return Err(ConnectionlessError::InvalidMagicVersion(magic_version));
+        }
+        let server_challenge = reader.read_in::<32, u32>()?;
+        let client_challenge = reader.read_in::<32, u32>()?;
+
+        let auth_protocol = match reader.read_in::<32, u32>()? {
+            1 => AuthProtocolType::AuthCertificate,
+            2 => AuthProtocolType::HashedCdKey,
+            3 => AuthProtocolType::Steam,
+            _invalid => return Err(ConnectionlessError::InvalidAuthProtocol(_invalid)),
+        };
+
+        Ok(Self {
+            server_challenge,
+            client_challenge,
+            auth_protocol,
+        })
     }
 
     fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
-        writer.write_out::<32, _>(0x5a4f_4933)?; // S2C_MAGICVERSION
+        writer.write_out::<32, _>(S2C_MAGICVERSION)?;
         writer.write_out::<32, _>(self.server_challenge)?;
         writer.write_out::<32, _>(self.client_challenge)?;
 
@@ -161,7 +203,7 @@ impl Message<ConnectionlessError> for S2C_Challenge {
 
 #[derive(Debug)]
 pub struct S2C_Connection {
-    client_challenge: u32,
+    pub client_challenge: u32,
 }
 
 impl Message<ConnectionlessError> for S2C_Connection {
@@ -173,7 +215,9 @@ impl Message<ConnectionlessError> for S2C_Connection {
     where
         Self: Sized,
     {
-        todo!()
+        let client_challenge = reader.read_in::<32, u32>()?;
+
+        Ok(Self { client_challenge })
     }
 
     fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
@@ -215,8 +259,7 @@ macro_rules! read_message_match {
     ($reader:ident, $side:ident, $message_type:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message_type {
             $($struct::TYPE if $struct::SIDE.can_receive($side) => ConnectionlessMessage::$discriminant($struct::read(&mut $reader)?),)*
-            // TODO: Use a custom error for this, instead of crashing.
-            _ => todo!("unimplemented message type {} for side {:?}", $message_type as char, $side)
+            _ => return Err(ConnectionlessError::UnknownMessage($message_type, $side))
         }
     };
 }
@@ -231,6 +274,15 @@ macro_rules! write_message_match {
             },)*
         }
     };
+}
+
+#[derive(Debug)]
+pub enum ConnectionlessMessage {
+    A2S_GetChallenge(A2S_GetChallenge),
+    C2S_Connect(C2S_Connect),
+    S2C_Challenge(S2C_Challenge),
+    S2C_Connection(S2C_Connection),
+    S2C_ConnReject(S2C_ConnReject),
 }
 
 impl ConnectionlessMessage {
