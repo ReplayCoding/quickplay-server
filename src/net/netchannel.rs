@@ -5,7 +5,7 @@ use crate::io_util;
 use super::{
     compression::{self, CompressionError},
     message::MessageSide,
-    netmessage::{read_messages, write_messages, NetMessage},
+    netmessage::{read_messages, write_messages, NetMessage, NetMessageError},
 };
 use bitflags::bitflags;
 use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
@@ -39,6 +39,8 @@ pub enum NetChannelError {
     Compression(CompressionError),
     #[error("invalid reliable state")]
     InvalidReliableState,
+    #[error("netmessage error: {0}")]
+    NetMessage(#[from] NetMessageError),
 }
 
 bitflags! {
@@ -501,6 +503,7 @@ impl Subchannel {
     }
 }
 
+#[derive(Debug)]
 pub struct ReceivedFile {
     pub transfer_id: u32,
     pub filename: String,
