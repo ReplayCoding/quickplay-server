@@ -9,6 +9,9 @@ use std::{
 
 use argh::FromArgs;
 use configuration::Configuration;
+use net::connectionless::server_machine::{
+    connectionless_server_machine, ConnectionlessServerMachineResponse,
+};
 use net::message::MessageSide;
 use net::netchannel::NetChannel;
 use net::netmessage::{Disconnect, NetMessage, StringCmd};
@@ -190,16 +193,18 @@ impl Server {
 
         match packet {
             Packet::Connectionless(data) => {
-                if let Some(challenge) = net::connectionless::process_connectionless_packet(
-                    &self.socket,
-                    from,
-                    &data,
-                    self.configuration,
-                )
-                .await?
-                {
+                let ConnectionlessServerMachineResponse {
+                    response,
+                    challenge,
+                } = connectionless_server_machine(&data, from)?;
+
+                if let Some(response) = response {
+                    self.socket.send_to(&response, from).await?;
+                }
+
+                if let Some(challenge) = challenge {
                     self.create_connection(from, challenge).await;
-                };
+                }
             }
             Packet::Regular(data) => {
                 if let Some((_, packet_receiver)) = self.connections.read().await.get(&from) {

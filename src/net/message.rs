@@ -21,7 +21,7 @@ impl MessageSide {
 }
 
 /// A single generic message.
-pub(super) trait Message {
+pub(super) trait Message<Err> {
     /// This is used to identify the message. It may collide with other
     /// messages, as long as those messages cannot be receieved from the same
     /// side.
@@ -34,8 +34,8 @@ pub(super) trait Message {
         Self::TYPE
     }
 
-    fn read(reader: &mut impl BitRead) -> std::io::Result<Self>
+    fn read(reader: &mut impl BitRead) -> Result<Self, Err>
     where
         Self: Sized;
-    fn write(&self, writer: &mut impl BitWrite) -> std::io::Result<()>;
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), Err>;
 }

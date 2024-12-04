@@ -1,254 +1,375 @@
-use std::{
-    hash::{DefaultHasher, Hash, Hasher},
-    io::Cursor,
-    net::SocketAddr,
+// Connectionless message types are named such that this will cause a bunch of
+// warnings.
+#![allow(non_camel_case_types)]
+use std::io::Cursor;
+
+use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
+use strum::EnumDiscriminants;
+use thiserror::Error;
+
+use crate::io_util::{read_string, write_string};
+
+use super::{
+    message::{Message, MessageSide},
+    packet::CONNECTIONLESS_HEADER,
 };
 
-use anyhow::anyhow;
-use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
-use tokio::net::UdpSocket;
-use tracing::trace;
-
-use crate::{configuration::Configuration, io_util::write_string};
-
-use super::packet::CONNECTIONLESS_HEADER;
-
-const PROTOCOL_VERSION: u8 = 24;
-const AUTH_PROTOCOL_HASHEDCDKEY: u32 = 2;
-
-const A2S_INFO_QUERY_STRING: &[u8; 20] = b"Source Engine Query\0";
-
-/// Create an opaque challenge number for an address, which will be consistent for this address
-fn get_challenge_for_address(addr: SocketAddr) -> u32 {
-    // TODO: evaluate if this hasher fits our needs
-    let mut hasher = DefaultHasher::new();
-    addr.hash(&mut hasher);
-
-    // intentionally truncating the value
-    hasher.finish() as u32
+#[derive(Error, Debug)]
+pub enum ConnectionlessError {
+    #[error("invalid auth protocol: {0}")]
+    InvalidAuthProtocol(u32),
+    #[error("steam auth key is too long: {0}")]
+    SteamAuthKeyTooLong(usize),
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
-async fn reject_connection(
-    socket: &UdpSocket,
-    from: SocketAddr,
+#[derive(Debug)]
+pub enum ConnectionlessMessage {
+    A2S_GetChallenge(A2S_GetChallenge),
+    C2S_Connect(C2S_Connect),
+    S2C_Challenge(S2C_Challenge),
+    S2C_Connection(S2C_Connection),
+    S2C_ConnReject(S2C_ConnReject),
+}
+
+#[derive(Debug)]
+pub struct A2S_GetChallenge {
+    challenge: u32,
+}
+
+impl Message<ConnectionlessError> for A2S_GetChallenge {
+    const TYPE: u8 = b'q';
+
+    const SIDE: MessageSide = MessageSide::Any;
+
+    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    where
+        Self: Sized,
+    {
+        let challenge = reader.read_in::<32, u32>()?;
+        Ok(Self { challenge })
+    }
+
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+        todo!()
+    }
+}
+
+#[derive(Debug, EnumDiscriminants)]
+#[strum_discriminants(name(AuthProtocolType))]
+enum AuthProtocol {
+    AuthCertificate(String),
+    HashedCdKey(String),
+    Steam(Vec<u8>),
+}
+
+#[derive(Debug)]
+pub struct C2S_Connect {
+    protocol_version: u32,
+    auth_protocol: AuthProtocol,
+    server_challenge: u32,
     client_challenge: u32,
-    message: &str,
-) -> anyhow::Result<()> {
-    let mut response_cursor = Cursor::new(Vec::<u8>::new());
-    let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
-
-    response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
-    response.write_out::<8, _>(b'9')?; // S2C_CONNREJECT
-    response.write_out::<32, _>(client_challenge)?; // S2C_CONNREJECT
-    write_string(&mut response, message)?;
-
-    socket.send_to(&response_cursor.into_inner(), from).await?;
-
-    Ok(())
+    name: String,
+    password: String,
+    product_version: String,
 }
 
-async fn handle_a2s_get_challenge<R: BitRead>(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    reader: &mut R,
-) -> anyhow::Result<()> {
-    let client_challenge: u32 = reader.read_in::<32, _>()?;
-    let server_challenge = get_challenge_for_address(from);
+impl Message<ConnectionlessError> for C2S_Connect {
+    const TYPE: u8 = b'k';
 
-    trace!("got challenge {client_challenge:08x} from client");
+    const SIDE: MessageSide = MessageSide::Client;
 
-    let mut response_cursor = Cursor::new(Vec::<u8>::new());
-    let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
+    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    where
+        Self: Sized,
+    {
+        let protocol_version: u32 = reader.read_in::<32, _>()?;
+        let auth_protocol: u32 = reader.read_in::<32, _>()?;
+        let server_challenge: u32 = reader.read_in::<32, _>()?;
+        let client_challenge: u32 = reader.read_in::<32, _>()?;
+        let name = read_string(reader, 256)?;
+        let password = read_string(reader, 256)?;
+        let product_version = read_string(reader, 32)?;
 
-    response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
-    response.write_out::<8, _>(b'A')?; // S2C_CHALLENGE
-    response.write_out::<32, _>(0x5a4f_4933)?; // S2C_MAGICVERSION
-    response.write_out::<32, _>(server_challenge)?;
-    response.write_out::<32, _>(client_challenge)?;
-    response.write_out::<32, _>(AUTH_PROTOCOL_HASHEDCDKEY)?;
+        let auth_protocol = match auth_protocol {
+            1 => AuthProtocol::AuthCertificate(read_string(reader, 2048)?),
+            2 => AuthProtocol::HashedCdKey(read_string(reader, 2048)?),
+            3 => {
+                let key_len = reader.read_in::<16, u16>()?;
+                if key_len > 2048 {
+                    return Err(ConnectionlessError::SteamAuthKeyTooLong(key_len.into()));
+                }
 
-    socket.send_to(&response_cursor.into_inner(), from).await?;
+                let mut key = vec![0u8; usize::from(key_len)];
+                reader.read_bytes(&mut key)?;
 
-    Ok(())
-}
-
-async fn handle_c2s_connect(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    reader: &mut BitReader<Cursor<&[u8]>, LittleEndian>,
-) -> anyhow::Result<u32> {
-    let protocol_version: u32 = reader.read_in::<32, _>()?;
-    let auth_protocol: u32 = reader.read_in::<32, _>()?;
-    let server_challenge: u32 = reader.read_in::<32, _>()?;
-    let client_challenge: u32 = reader.read_in::<32, _>()?;
-
-    if server_challenge != get_challenge_for_address(from) {
-        reject_connection(
-            socket,
-            from,
-            client_challenge,
-            "#GameUI_ServerRejectBadChallenge",
-        )
-        .await?;
-        return Err(anyhow!(
-            "mismatched server challenge: {} != {}",
-            server_challenge,
-            get_challenge_for_address(from)
-        ));
-    };
-
-    if protocol_version != u32::from(PROTOCOL_VERSION) {
-        reject_connection(
-            socket,
-            from,
-            client_challenge,
-            "Unexpected protocol version",
-        )
-        .await?;
-        return Err(anyhow!("unexpected protocl version: {protocol_version}"));
-    }
-
-    if auth_protocol != AUTH_PROTOCOL_HASHEDCDKEY {
-        reject_connection(
-            socket,
-            from,
-            client_challenge,
-            "unexpected authentication protocol",
-        )
-        .await?;
-
-        return Err(anyhow!(
-            "unexpected authentication protocol: {}",
-            auth_protocol
-        ));
-    }
-
-    // Unused data, no need to read it
-    // let name = read_string(reader, 256)?;
-    // let password = read_string(reader, 256)?;
-    // let product_version = read_string(reader, 32)?;
-    // let cdkey = read_string(reader, 2048)?;
-
-    // Everything is correct, tell the client to switch over to netchannels
-    let mut response_cursor = Cursor::new(Vec::<u8>::new());
-    let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
-
-    response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
-    response.write_out::<8, _>(b'B')?; // S2C_CONNECTION
-    response.write_out::<32, _>(client_challenge)?;
-    write_string(&mut response, "0000000000")?; // padding
-
-    socket.send_to(&response_cursor.into_inner(), from).await?;
-
-    Ok(server_challenge)
-}
-
-async fn handle_a2s_info(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    data: &[u8],
-    configuration: &Configuration,
-) -> anyhow::Result<()> {
-    // The packet always has the query string, but won't have a challenge value
-    // unless we send one back. So if the entire message is the query string, we
-    // can send a challenge.
-    if data == A2S_INFO_QUERY_STRING {
-        let mut response_cursor = Cursor::new(Vec::<u8>::new());
-        let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
-
-        // See the documentation for A2S_SERVERQUERY_GETCHALLENGE on the VDC wiki.
-        response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
-        response.write_out::<8, _>(b'A')?; // S2C_CHALLENGE
-        response.write_out::<32, _>(get_challenge_for_address(from))?;
-
-        socket.send_to(&response_cursor.into_inner(), from).await?;
-    } else {
-        if data.get(0..A2S_INFO_QUERY_STRING.len()) != Some(A2S_INFO_QUERY_STRING) {
-            return Err(anyhow!("query string isn't correct"));
-        }
-        let challenge = data
-            .get(A2S_INFO_QUERY_STRING.len()..A2S_INFO_QUERY_STRING.len() + 4)
-            .ok_or_else(|| anyhow!("couldn't read challenge value"))?;
-        let challenge =
-            u32::from_le_bytes(challenge.try_into().expect("this should always be 4 bytes"));
-
-        if challenge != get_challenge_for_address(from) {
-            return Err(anyhow!("unexpected challenge"));
+                AuthProtocol::Steam(key)
+            }
+            _ => return Err(ConnectionlessError::InvalidAuthProtocol(auth_protocol)),
         };
 
-        send_s2a_info_response(socket, from, configuration).await?;
+        Ok(Self {
+            protocol_version,
+            auth_protocol,
+            server_challenge,
+            client_challenge,
+            name,
+            password,
+            product_version,
+        })
     }
 
-    Ok(())
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+        todo!()
+    }
 }
 
-async fn send_s2a_info_response(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    configuration: &Configuration,
-) -> anyhow::Result<()> {
-    let mut response_cursor = Cursor::new(Vec::<u8>::new());
-    let mut response = BitWriter::endian(&mut response_cursor, LittleEndian);
-
-    response.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
-    response.write_out::<8, _>(b'I')?; // S2A_INFO_SRC
-    response.write_out::<8, _>(PROTOCOL_VERSION)?;
-    write_string(&mut response, &configuration.server.server_name)?; // server name
-    write_string(&mut response, "")?; // map name
-    write_string(&mut response, "")?; // game dir
-    write_string(&mut response, &configuration.server.app_desc)?; // game description
-    response.write_out::<16, _>(configuration.server.app_id)?; // app id
-    response.write_out::<8, _>(0)?; // player count
-    response.write_out::<8, _>(0)?; // max players
-    response.write_out::<8, _>(0)?; // bot count
-    response.write_out::<8, _>(b'p')?; // server type, p is hltv relay/proxy (lol)
-    response.write_out::<8, _>(b'l')?; // OS, hardcoded to linux for now
-    response.write_out::<8, _>(0)?; // visibility, 0 for public
-    response.write_out::<8, _>(0)?; // VAC, 0 for insecure (don't care since any server we redirect to can choose their own policy)
-    write_string(&mut response, &configuration.server.app_version)?; // app version
-
-    socket.send_to(&response_cursor.into_inner(), from).await?;
-
-    Ok(())
+#[derive(Debug)]
+pub struct S2C_Challenge {
+    server_challenge: u32,
+    client_challenge: u32,
+    auth_protocol: AuthProtocolType,
 }
 
-/// Handle a connectionless packet. Returns a challenge number when the
-/// connection handshake has completed, which should be provided to the
-// netchannel
-pub async fn process_connectionless_packet(
-    socket: &UdpSocket,
-    from: SocketAddr,
-    data: &[u8],
-    configuration: &Configuration,
-) -> anyhow::Result<Option<u32>> {
-    // Cut off connectionless header
-    let data = data
-        .get(4..)
-        .ok_or_else(|| anyhow!("connectionless packet doesn't have any data"))?;
+impl Message<ConnectionlessError> for S2C_Challenge {
+    const TYPE: u8 = b'A';
 
-    let mut reader = BitReader::endian(Cursor::new(data), LittleEndian);
+    const SIDE: MessageSide = MessageSide::Server;
 
-    let command: u8 = reader.read_in::<8, _>()?;
+    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    where
+        Self: Sized,
+    {
+        todo!()
+    }
 
-    match command {
-        // A2S_GETCHALLENGE
-        b'q' => handle_a2s_get_challenge(socket, from, &mut reader).await?,
-        // C2S_CONNECT
-        b'k' => return Ok(Some(handle_c2s_connect(socket, from, &mut reader).await?)),
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+        writer.write_out::<32, _>(0x5a4f_4933)?; // S2C_MAGICVERSION
+        writer.write_out::<32, _>(self.server_challenge)?;
+        writer.write_out::<32, _>(self.client_challenge)?;
 
-        // A2S_INFO
-        // slice access will never panic because the command is 1 byte
-        b'T' => handle_a2s_info(socket, from, &data[1..], configuration).await?,
-        // A2S_PLAYER, silently drop
-        b'U' => {}
-        _ => {
-            return Err(anyhow!(
-                "unhandled connectionless packet type: {} ({:?})",
-                command,
-                command as char
-            ))
+        writer.write_out::<32, _>(match self.auth_protocol {
+            AuthProtocolType::AuthCertificate => 1,
+            AuthProtocolType::HashedCdKey => 2,
+            AuthProtocolType::Steam => 3,
+        })?;
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct S2C_Connection {
+    client_challenge: u32,
+}
+
+impl Message<ConnectionlessError> for S2C_Connection {
+    const TYPE: u8 = b'B';
+
+    const SIDE: MessageSide = MessageSide::Server;
+
+    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    where
+        Self: Sized,
+    {
+        todo!()
+    }
+
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+        writer.write_out::<32, _>(self.client_challenge)?;
+        write_string(writer, "0000000000")?; // padding
+
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub struct S2C_ConnReject {
+    client_challenge: u32,
+    message: String,
+}
+
+impl Message<ConnectionlessError> for S2C_ConnReject {
+    const TYPE: u8 = b'9';
+
+    const SIDE: MessageSide = MessageSide::Server;
+
+    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    where
+        Self: Sized,
+    {
+        todo!()
+    }
+
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+        writer.write_out::<32, _>(self.client_challenge)?;
+        write_string(writer, &self.message)?;
+
+        Ok(())
+    }
+}
+
+/// Helper to generate the match statement for reading messages
+macro_rules! read_message_match {
+    ($reader:ident, $side:ident, $message_type:ident, $($struct:ident => $discriminant:ident), *) => {
+        match $message_type {
+            $($struct::TYPE if $struct::SIDE.can_receive($side) => ConnectionlessMessage::$discriminant($struct::read(&mut $reader)?),)*
+            // TODO: Use a custom error for this, instead of crashing.
+            _ => todo!("unimplemented message type {} for side {:?}", $message_type as char, $side)
         }
     };
+}
 
-    Ok(None)
+/// Helper to generate the match statement for writing messages
+macro_rules! write_message_match {
+    ($writer:ident, $message:ident, $($discriminant:ident), *) => {
+        match $message {
+            $(ConnectionlessMessage::$discriminant(message) => {
+                $writer.write_out::<8, _>(message.get_type_())?;
+                message.write(&mut $writer)?
+            },)*
+        }
+    };
+}
+
+impl ConnectionlessMessage {
+    /// Read a single connectionless message.
+    pub fn read(data: &[u8], side: MessageSide) -> Result<Self, ConnectionlessError> {
+        let mut reader = BitReader::endian(Cursor::new(data), LittleEndian);
+        _ = reader.read_in::<32, u32>()?; // consume 0xFFFF_FFFF connectionless header
+
+        let message_type = reader.read_in::<8, u8>()?;
+        Ok(read_message_match!(reader, side, message_type,
+            A2S_GetChallenge => A2S_GetChallenge,
+            C2S_Connect      => C2S_Connect,
+            S2C_Challenge    => S2C_Challenge,
+            S2C_Connection   => S2C_Connection,
+            S2C_ConnReject   => S2C_ConnReject
+        ))
+    }
+
+    pub fn write(&self) -> Result<Vec<u8>, ConnectionlessError> {
+        let mut writer = BitWriter::endian(Cursor::new(Vec::<u8>::new()), LittleEndian);
+        writer.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
+        write_message_match!(
+            writer,
+            self,
+            A2S_GetChallenge,
+            C2S_Connect,
+            S2C_Challenge,
+            S2C_Connection,
+            S2C_ConnReject
+        );
+
+        Ok(writer.into_writer().into_inner())
+    }
+}
+
+pub mod server_machine {
+    use std::{
+        hash::{DefaultHasher, Hash, Hasher},
+        net::SocketAddr,
+    };
+
+    use tracing::trace;
+
+    use crate::net::{connectionless::ConnectionlessMessage, message::MessageSide};
+
+    use super::{
+        AuthProtocolType, ConnectionlessError, S2C_Challenge, S2C_ConnReject, S2C_Connection,
+    };
+
+    const PROTOCOL_VERSION: u8 = 24;
+
+    /// Create an opaque challenge number for an address, which will be consistent for this address
+    fn get_challenge_for_address(addr: SocketAddr) -> u32 {
+        // TODO: evaluate if this hasher fits our needs
+        let mut hasher = DefaultHasher::new();
+        addr.hash(&mut hasher);
+
+        // intentionally truncating the value
+        hasher.finish() as u32
+    }
+
+    pub struct ConnectionlessServerMachineResponse {
+        /// The response to send back to the client
+        pub response: Option<Vec<u8>>,
+        /// If this is Some, a connection should be established using this
+        /// challenge value.
+        pub challenge: Option<u32>,
+    }
+
+    /// Run the connectionless server state machine. `data` is the received
+    /// packet data, including the header.
+    pub fn connectionless_server_machine(
+        data: &[u8],
+        from: SocketAddr,
+    ) -> Result<ConnectionlessServerMachineResponse, ConnectionlessError> {
+        let message = ConnectionlessMessage::read(data, MessageSide::Server)?;
+        match message {
+            ConnectionlessMessage::A2S_GetChallenge(message) => {
+                let server_challenge = get_challenge_for_address(from);
+                Ok(ConnectionlessServerMachineResponse {
+                    response: Some(
+                        ConnectionlessMessage::S2C_Challenge(S2C_Challenge {
+                            server_challenge,
+                            client_challenge: message.challenge,
+                            auth_protocol: AuthProtocolType::HashedCdKey,
+                        })
+                        .write()?,
+                    ),
+                    challenge: None,
+                })
+            }
+
+            ConnectionlessMessage::C2S_Connect(message) => {
+                if message.server_challenge != get_challenge_for_address(from) {
+                    return reject_connection(
+                        message.client_challenge,
+                        "#GameUI_ServerRejectBadChallenge",
+                    );
+                }
+
+                // TODO: check protocol version
+                // TODO: check auth protocol
+
+                Ok(ConnectionlessServerMachineResponse {
+                    response: Some(
+                        ConnectionlessMessage::S2C_Connection(S2C_Connection {
+                            client_challenge: message.client_challenge,
+                        })
+                        .write()?,
+                    ),
+                    challenge: Some(message.server_challenge),
+                })
+            }
+
+            _ => {
+                trace!("unhandled message received: {:?}", message);
+
+                // TODO: maybe make this an error instead?
+                Ok(ConnectionlessServerMachineResponse {
+                    response: None,
+                    challenge: None,
+                })
+            }
+        }
+    }
+
+    fn reject_connection(
+        client_challenge: u32,
+        message: &str,
+    ) -> Result<ConnectionlessServerMachineResponse, ConnectionlessError> {
+        Ok(ConnectionlessServerMachineResponse {
+            response: Some(
+                ConnectionlessMessage::S2C_ConnReject(S2C_ConnReject {
+                    client_challenge,
+                    message: message.to_string(),
+                })
+                .write()?,
+            ),
+            challenge: None,
+        })
+    }
 }

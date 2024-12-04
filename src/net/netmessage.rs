@@ -9,7 +9,7 @@ pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 #[derive(Debug, PartialEq, Eq)]
 pub struct Nop;
 
-impl Message for Nop {
+impl Message<std::io::Error> for Nop {
     const TYPE: u8 = 0;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -30,7 +30,7 @@ pub struct Disconnect {
     pub reason: String,
 }
 
-impl Message for Disconnect {
+impl Message<std::io::Error> for Disconnect {
     const TYPE: u8 = 1;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -56,7 +56,7 @@ pub struct StringCmd {
     pub command: String,
 }
 
-impl Message for StringCmd {
+impl Message<std::io::Error> for StringCmd {
     const TYPE: u8 = 4;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -79,7 +79,7 @@ pub struct SetConVars {
     pub convars: Vec<(String, String)>,
 }
 
-impl Message for SetConVars {
+impl Message<std::io::Error> for SetConVars {
     const TYPE: u8 = 5;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -108,7 +108,7 @@ pub struct SignonState {
     pub spawn_count: i32,
 }
 
-impl Message for SignonState {
+impl Message<std::io::Error> for SignonState {
     const TYPE: u8 = 6;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -135,7 +135,7 @@ pub struct Print {
     pub text: String,
 }
 
-impl Message for Print {
+impl Message<std::io::Error> for Print {
     const TYPE: u8 = 7;
     const SIDE: MessageSide = MessageSide::Server;
 
@@ -165,7 +165,7 @@ pub struct File {
     pub transfer_id: u32,
 }
 
-impl Message for File {
+impl Message<std::io::Error> for File {
     const TYPE: u8 = 2;
     const SIDE: MessageSide = MessageSide::Any;
 
@@ -200,6 +200,7 @@ macro_rules! read_messages_match {
     ($reader:ident, $side:ident, $message_type:ident, $($struct:ident => $discriminant:ident), *) => {
         match $message_type {
             $($struct::TYPE if $struct::SIDE.can_receive($side) => NetMessage::$discriminant($struct::read($reader)?),)*
+            // TODO: Use a custom error for this, instead of crashing.
             _ => todo!("unimplemented message type {} for side {:?}", $message_type, $side)
         }
     };
@@ -207,7 +208,7 @@ macro_rules! read_messages_match {
 
 /// Helper to generate the match statement for writing messages
 macro_rules! write_messages_match {
-    ($writer:ident, $message:ident, $($struct:ident => $discriminant:ident), *) => {
+    ($writer:ident, $message:ident, $($discriminant:ident), *) => {
         match $message {
             $(NetMessage::$discriminant(message) => {
                 $writer.write_out::<{ NETMSG_TYPE_BITS }, _>(message.get_type_())?;
@@ -252,13 +253,13 @@ pub fn read_messages(
 pub fn write_messages(writer: &mut impl BitWrite, messages: &[NetMessage]) -> std::io::Result<()> {
     for message in messages {
         write_messages_match!(writer, message,
-            Nop         => Nop,
-            Disconnect  => Disconnect,
-            StringCmd   => StringCmd,
-            SetConVars  => SetConVars,
-            SignonState => SignonState,
-            Print       => Print,
-            File        => File);
+            Nop,
+            Disconnect,
+            StringCmd,
+            SetConVars,
+            SignonState,
+            Print,
+            File);
     }
 
     Ok(())
