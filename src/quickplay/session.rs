@@ -42,6 +42,7 @@ use tracing::trace;
 
 use crate::{
     configuration::Configuration,
+    net::netmessage::ConVar,
     quickplay::global::{Gamemodes, QuickplayGlobal, ServerInfo, ServerTags},
 };
 
@@ -239,11 +240,8 @@ impl QuickplaySession {
         }
     }
 
-    pub fn update_preferences_from_convars(
-        &mut self,
-        convars: &[(String, String)],
-    ) -> Result<(), String> {
-        for (name, value) in convars {
+    pub fn update_preferences_from_convars(&mut self, convars: &[ConVar]) -> Result<(), String> {
+        for ConVar { name, value } in convars {
             // source doesn't let you undefine convars made with setinfo. as a
             // workaround, if the user makes the value an empty string it will
             // be treated as if it doesn't exist.
