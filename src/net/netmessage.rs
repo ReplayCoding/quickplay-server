@@ -3,7 +3,10 @@ use thiserror::Error;
 
 use crate::io_util::{read_string, write_string};
 
-use super::message::{Message, MessageSide};
+use super::{
+    message::{Message, MessageSide},
+    usercmd::UserCmd,
+};
 
 pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 
@@ -347,6 +350,53 @@ impl Message<NetMessageError> for Tick {
     }
 }
 
+/// Largest # of commands to send in a packet
+const NUM_NEW_COMMAND_BITS: u32 = 4;
+
+/// Max number of history commands to send ( 2 by default ) in case of dropped packets
+const NUM_BACKUP_COMMAND_BITS: u32 = 3;
+
+#[derive(Debug, PartialEq)]
+pub struct Move {
+    pub new_commands: u8,
+    pub backup_commands: u8,
+    pub commands: Vec<UserCmd>,
+}
+
+impl Message<NetMessageError> for Move {
+    const TYPE: u8 = 9;
+
+    const SIDE: MessageSide = MessageSide::Client;
+
+    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    where
+        Self: Sized,
+    {
+        let new_commands = reader.read_in::<NUM_NEW_COMMAND_BITS, u8>()?;
+        let backup_commands = reader.read_in::<NUM_BACKUP_COMMAND_BITS, u8>()?;
+        // This specifies the length of the remaining UserCmds, but since we
+        // just read them out here, it's not needed.
+        let _length = reader.read_in::<16, u16>()?;
+
+        // avoid overflowing the u8
+        let total_cmds: u16 = u16::from(new_commands) + u16::from(backup_commands);
+        // TODO: check for too many commands?
+        let commands = (0..total_cmds)
+            .map(|_| UserCmd::read(reader))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            new_commands,
+            backup_commands,
+            commands,
+        })
+    }
+
+    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+        todo!()
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum NetMessage {
     Nop(Nop),
@@ -358,6 +408,7 @@ pub enum NetMessage {
     File(File),
     ServerInfo(ServerInfo),
     Tick(Tick),
+    Move(Move),
 }
 
 /// Helper to generate the match statement for reading messages
@@ -403,7 +454,8 @@ pub fn read_messages(
                     Print       => Print,
                     File        => File,
                     ServerInfo  => ServerInfo,
-                    Tick        => Tick);
+                    Tick        => Tick,
+                    Move        => Move);
 
                 messages.push(message);
             }
@@ -432,7 +484,8 @@ pub fn write_messages(
             Print,
             File,
             ServerInfo,
-            Tick
+            Tick,
+            Move
         );
     }
 
