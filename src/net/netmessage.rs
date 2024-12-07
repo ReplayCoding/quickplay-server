@@ -1,7 +1,9 @@
-use bitstream_io::{BitRead, BitWrite};
 use thiserror::Error;
 
-use crate::io_util::{read_string, write_string};
+use crate::{
+    bitstream::{BitReader, BitWriter},
+    io_util::{read_string, write_string},
+};
 
 use super::{
     message::{Message, MessageSide},
@@ -27,14 +29,14 @@ impl Message<NetMessageError> for Nop {
     const TYPE: u8 = 0;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
         Ok(Self)
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         Ok(())
     }
 }
@@ -48,7 +50,7 @@ impl Message<NetMessageError> for Disconnect {
     const TYPE: u8 = 1;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -56,7 +58,7 @@ impl Message<NetMessageError> for Disconnect {
         Ok(Self { reason })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError>
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError>
     where
         Self: Sized,
     {
@@ -74,7 +76,7 @@ impl Message<NetMessageError> for StringCmd {
     const TYPE: u8 = 4;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -82,7 +84,7 @@ impl Message<NetMessageError> for StringCmd {
         Ok(Self { command })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         write_string(writer, &self.command)?;
         Ok(())
     }
@@ -103,7 +105,7 @@ impl Message<NetMessageError> for SetConVars {
     const TYPE: u8 = 5;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -117,7 +119,7 @@ impl Message<NetMessageError> for SetConVars {
         Ok(Self { convars })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         let num_convars = u8::try_from(self.convars.len())
             .map_err(|_| NetMessageError::TooManyConVars(self.convars.len()))?;
 
@@ -141,7 +143,7 @@ impl Message<NetMessageError> for SignonState {
     const TYPE: u8 = 6;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -154,7 +156,7 @@ impl Message<NetMessageError> for SignonState {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         writer.write_out::<8, _>(self.signon_state)?;
         writer.write_out::<32, _>(self.spawn_count)?;
         Ok(())
@@ -170,7 +172,7 @@ impl Message<NetMessageError> for Print {
     const TYPE: u8 = 7;
     const SIDE: MessageSide = MessageSide::Server;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -178,7 +180,7 @@ impl Message<NetMessageError> for Print {
         Ok(Self { text })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         write_string(writer, &self.text)?;
         Ok(())
     }
@@ -200,7 +202,7 @@ impl Message<NetMessageError> for File {
     const TYPE: u8 = 2;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -219,7 +221,7 @@ impl Message<NetMessageError> for File {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         writer.write_out::<32, u32>(self.transfer_id)?;
         write_string(writer, &self.filename)?;
         writer.write_bit(self.mode == FileMode::Request)?;
@@ -258,7 +260,7 @@ impl Message<NetMessageError> for ServerInfo {
 
     const SIDE: MessageSide = MessageSide::Server;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -311,7 +313,7 @@ impl Message<NetMessageError> for ServerInfo {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         todo!()
     }
 }
@@ -330,7 +332,7 @@ impl Message<NetMessageError> for Tick {
 
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -345,7 +347,7 @@ impl Message<NetMessageError> for Tick {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         todo!()
     }
 }
@@ -368,7 +370,7 @@ impl Message<NetMessageError> for Move {
 
     const SIDE: MessageSide = MessageSide::Client;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, NetMessageError>
+    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
@@ -392,7 +394,7 @@ impl Message<NetMessageError> for Move {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), NetMessageError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         todo!()
     }
 }
@@ -436,7 +438,7 @@ macro_rules! write_messages_match {
 /// Read all remaining messages from a bitstream. Any messages that are read
 /// will be appended to `messages`.
 pub fn read_messages(
-    reader: &mut impl BitRead,
+    reader: &mut BitReader,
     side: MessageSide,
     messages: &mut Vec<NetMessage>,
 ) -> Result<(), NetMessageError> {
@@ -469,7 +471,7 @@ pub fn read_messages(
 
 /// Write all messages in `messages` to `writer`.
 pub fn write_messages(
-    writer: &mut impl BitWrite,
+    writer: &mut BitWriter,
     messages: &[NetMessage],
 ) -> Result<(), NetMessageError> {
     for message in messages {
@@ -494,15 +496,11 @@ pub fn write_messages(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
-    use bitstream_io::{BitReader, BitWriter, LittleEndian};
-
     use super::*;
 
     #[test]
     fn test_read_messages_single() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let mut writer = BitWriter::new();
         let expected_message = &[NetMessage::Print(Print {
             text: "test string yay".to_string(),
         })];
@@ -511,8 +509,8 @@ mod tests {
 
         writer.byte_align().unwrap();
 
-        let mut reader =
-            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new(&data);
         let mut messages = vec![];
         read_messages(&mut reader, MessageSide::Client, &mut messages).unwrap();
 
@@ -521,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_messages_roundtrip() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let mut writer = BitWriter::new();
         let expected_messages = &[
             NetMessage::Print(crate::net::netmessage::Print {
                 text: "test string yay".to_string(),
@@ -535,8 +533,8 @@ mod tests {
 
         writer.byte_align().unwrap();
 
-        let mut reader =
-            BitReader::endian(Cursor::new(writer.into_writer().into_inner()), LittleEndian);
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new(&data);
         let mut messages = vec![];
         read_messages(&mut reader, MessageSide::Client, &mut messages).unwrap();
 

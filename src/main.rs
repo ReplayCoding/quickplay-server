@@ -1,3 +1,4 @@
+mod bitstream;
 mod configuration;
 mod io_util;
 mod net;

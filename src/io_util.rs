@@ -1,15 +1,16 @@
 use std::io;
 
-use bitstream_io::{BitRead, BitWrite};
+use crate::bitstream::BitReader;
+use crate::bitstream::BitWriter;
 
-pub fn write_string(writer: &mut impl BitWrite, string: &str) -> io::Result<()> {
+pub fn write_string(writer: &mut BitWriter, string: &str) -> io::Result<()> {
     writer.write_bytes(string.as_bytes())?;
     writer.write_out::<8, _>(0)?; // write NUL terminator
 
     io::Result::Ok(())
 }
 
-pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> io::Result<String> {
+pub fn read_string(reader: &mut BitReader, max_len: usize) -> io::Result<String> {
     let mut data = vec![];
     let mut chars_read = 0;
     loop {
@@ -35,7 +36,7 @@ pub fn read_string(reader: &mut impl BitRead, max_len: usize) -> io::Result<Stri
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
-pub fn read_varint32(reader: &mut impl BitRead) -> io::Result<u32> {
+pub fn read_varint32(reader: &mut BitReader) -> io::Result<u32> {
     let mut result: u32 = 0;
     let mut count: u32 = 0;
 
@@ -57,7 +58,7 @@ pub fn read_varint32(reader: &mut impl BitRead) -> io::Result<u32> {
     Ok(result)
 }
 
-pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> io::Result<()> {
+pub fn write_varint32(writer: &mut BitWriter, value: u32) -> io::Result<()> {
     let mut value = value;
 
     while value > 0x7f {
@@ -72,17 +73,15 @@ pub fn write_varint32(writer: &mut impl BitWrite, value: u32) -> io::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use bitstream_io::{BitReader, BitWriter, LittleEndian};
-    use std::io::Cursor;
+    use crate::bitstream::{BitReader, BitWriter};
 
     #[test]
     fn test_string() {
-        let mut buffer: Vec<u8> = vec![];
-
-        let mut writer = BitWriter::endian(Cursor::new(&mut buffer), LittleEndian);
+        let mut writer = BitWriter::new();
         super::write_string(&mut writer, "TEST TEST TEST").expect("writes should work");
 
-        let mut reader = BitReader::endian(Cursor::new(&mut buffer), LittleEndian);
+        let bytes = writer.into_bytes();
+        let mut reader = BitReader::new(&bytes);
         super::read_string(&mut reader, 1024).expect("reads should work");
     }
 
@@ -99,25 +98,19 @@ mod tests {
         ];
 
         for (expected, bytes) in numbers {
-            let mut reader = BitReader::endian(Cursor::new(bytes), LittleEndian);
+            let mut reader = BitReader::new(bytes);
             assert_eq!(super::read_varint32(&mut reader).unwrap(), *expected);
         }
 
         // excess bytes should be ignored
-        let mut reader = BitReader::endian(
-            Cursor::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x41]),
-            LittleEndian,
-        );
+        let mut reader = BitReader::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x41]);
         assert_eq!(super::read_varint32(&mut reader).unwrap(), 0xFFFF_FFFF);
 
-        let mut bytes: Vec<u8> = vec![];
         for (number, expected) in numbers {
-            bytes.clear();
-
-            let mut writer = BitWriter::endian(Cursor::new(&mut bytes), LittleEndian);
+            let mut writer = BitWriter::new();
             super::write_varint32(&mut writer, *number).unwrap();
 
-            assert_eq!(*expected, bytes);
+            assert_eq!(*expected, writer.into_bytes());
         }
     }
 }

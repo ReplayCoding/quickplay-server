@@ -1,4 +1,4 @@
-use bitstream_io::{BitRead, BitWrite};
+use crate::bitstream::{BitReader, BitWriter};
 
 /// The sides that a message may be sent from
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -34,8 +34,8 @@ pub(super) trait Message<Err> {
         Self::TYPE
     }
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, Err>
+    fn read(reader: &mut BitReader) -> Result<Self, Err>
     where
         Self: Sized;
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), Err>;
+    fn write(&self, writer: &mut BitWriter) -> Result<(), Err>;
 }

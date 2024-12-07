@@ -1,13 +1,14 @@
 // Connectionless message types are named such that this will cause a bunch of
 // warnings.
 #![allow(non_camel_case_types)]
-use std::io::Cursor;
 
-use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
 use strum::EnumDiscriminants;
 use thiserror::Error;
 
-use crate::io_util::{read_string, write_string};
+use crate::{
+    bitstream::{BitReader, BitWriter},
+    io_util::{read_string, write_string},
+};
 
 use super::{
     message::{Message, MessageSide},
@@ -38,7 +39,7 @@ impl Message<ConnectionlessError> for A2S_GetChallenge {
 
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    fn read(reader: &mut BitReader) -> Result<Self, ConnectionlessError>
     where
         Self: Sized,
     {
@@ -46,7 +47,7 @@ impl Message<ConnectionlessError> for A2S_GetChallenge {
         Ok(Self { challenge })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.challenge)?;
         Ok(())
     }
@@ -76,7 +77,7 @@ impl Message<ConnectionlessError> for C2S_Connect {
 
     const SIDE: MessageSide = MessageSide::Client;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    fn read(reader: &mut BitReader) -> Result<Self, ConnectionlessError>
     where
         Self: Sized,
     {
@@ -116,7 +117,7 @@ impl Message<ConnectionlessError> for C2S_Connect {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.protocol_version)?;
         writer.write_out::<32, u32>(match self.auth_protocol {
             AuthProtocol::AuthCertificate(_) => 1,
@@ -139,7 +140,7 @@ impl Message<ConnectionlessError> for C2S_Connect {
 
                 // u16::MAX > 2048
                 writer.write_out::<16, _>(key.len() as u16)?;
-                writer.write_bytes(&key)?;
+                writer.write_bytes(key)?;
             }
         };
 
@@ -161,7 +162,7 @@ impl Message<ConnectionlessError> for S2C_Challenge {
 
     const SIDE: MessageSide = MessageSide::Server;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    fn read(reader: &mut BitReader) -> Result<Self, ConnectionlessError>
     where
         Self: Sized,
     {
@@ -186,7 +187,7 @@ impl Message<ConnectionlessError> for S2C_Challenge {
         })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(S2C_MAGICVERSION)?;
         writer.write_out::<32, _>(self.server_challenge)?;
         writer.write_out::<32, _>(self.client_challenge)?;
@@ -211,7 +212,7 @@ impl Message<ConnectionlessError> for S2C_Connection {
 
     const SIDE: MessageSide = MessageSide::Server;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    fn read(reader: &mut BitReader) -> Result<Self, ConnectionlessError>
     where
         Self: Sized,
     {
@@ -220,7 +221,7 @@ impl Message<ConnectionlessError> for S2C_Connection {
         Ok(Self { client_challenge })
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.client_challenge)?;
         write_string(writer, "0000000000")?; // padding
 
@@ -239,14 +240,14 @@ impl Message<ConnectionlessError> for S2C_ConnReject {
 
     const SIDE: MessageSide = MessageSide::Server;
 
-    fn read(reader: &mut impl BitRead) -> Result<Self, ConnectionlessError>
+    fn read(reader: &mut BitReader) -> Result<Self, ConnectionlessError>
     where
         Self: Sized,
     {
         todo!()
     }
 
-    fn write(&self, writer: &mut impl BitWrite) -> Result<(), ConnectionlessError> {
+    fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.client_challenge)?;
         write_string(writer, &self.message)?;
 
@@ -288,7 +289,7 @@ pub enum ConnectionlessMessage {
 impl ConnectionlessMessage {
     /// Read a single connectionless message.
     pub fn read(data: &[u8], side: MessageSide) -> Result<Self, ConnectionlessError> {
-        let mut reader = BitReader::endian(Cursor::new(data), LittleEndian);
+        let mut reader = BitReader::new(data);
         _ = reader.read_in::<32, u32>()?; // consume 0xFFFF_FFFF connectionless header
 
         let message_type = reader.read_in::<8, u8>()?;
@@ -302,7 +303,7 @@ impl ConnectionlessMessage {
     }
 
     pub fn write(&self) -> Result<Vec<u8>, ConnectionlessError> {
-        let mut writer = BitWriter::endian(Cursor::new(Vec::<u8>::new()), LittleEndian);
+        let mut writer = BitWriter::new();
         writer.write_out::<32, _>(CONNECTIONLESS_HEADER)?;
         write_message_match!(
             writer,
@@ -314,7 +315,7 @@ impl ConnectionlessMessage {
             S2C_ConnReject
         );
 
-        Ok(writer.into_writer().into_inner())
+        Ok(writer.into_bytes())
     }
 }
 

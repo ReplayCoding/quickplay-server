@@ -1,6 +1,9 @@
-use std::{collections::VecDeque, io::Cursor, ops::Range};
+use std::{collections::VecDeque, ops::Range};
 
-use crate::io_util;
+use crate::{
+    bitstream::{BitReader, BitWriter},
+    io_util,
+};
 
 use super::{
     compression::{self, CompressionError},
@@ -8,7 +11,7 @@ use super::{
     netmessage::{read_messages, write_messages, NetMessage, NetMessageError},
 };
 use bitflags::bitflags;
-use bitstream_io::{BitRead, BitReader, BitWrite, BitWriter, LittleEndian};
+
 use strum::{EnumCount, EnumDiscriminants, EnumIter, IntoEnumIterator};
 use thiserror::Error;
 use tracing::trace;
@@ -331,7 +334,7 @@ impl Subchannel {
     /// waiting to send.
     fn write(
         &mut self,
-        writer: &mut impl BitWrite,
+        writer: &mut BitWriter,
         transfers: &OutgoingReliableTransfers,
         subchannel_index: u8,
         send_seq_nr: i32,
@@ -383,7 +386,7 @@ impl Subchannel {
 
     fn write_header(
         &self,
-        writer: &mut impl BitWrite,
+        writer: &mut BitWriter,
         transfer: &OutgoingReliableTransfer,
         fragments: LengthRange<u32>,
         bytes: LengthRange<u32>,
@@ -534,7 +537,7 @@ struct IncomingReliableTransfer {
 impl IncomingReliableTransfer {
     /// Read a transfer header and create a new incoming transfer
     fn new_from_header(
-        reader: &mut impl BitRead,
+        reader: &mut BitReader,
         is_multi_block: bool,
     ) -> Result<Self, NetChannelError> {
         let bytes;
@@ -601,7 +604,7 @@ impl IncomingReliableTransfer {
     /// single-block, `start_fragment` and `num_fragments` are unused.
     fn read_data(
         &mut self,
-        reader: &mut impl BitRead,
+        reader: &mut BitReader,
         mut start_fragment: u32,
         mut num_fragments: u32,
     ) -> Result<(), NetChannelError> {
@@ -763,7 +766,7 @@ impl NetChannel {
         &mut self,
         packet: &[u8],
     ) -> Result<(Vec<NetMessage>, Vec<ReceivedFile>), NetChannelError> {
-        let mut reader = BitReader::endian(Cursor::new(packet), LittleEndian);
+        let mut reader = BitReader::new(packet);
         let mut messages = vec![];
         let mut files = vec![];
 
@@ -781,7 +784,7 @@ impl NetChannel {
     /// Read the packet header.
     fn read_header(
         &mut self,
-        reader: &mut impl BitRead,
+        reader: &mut BitReader,
         packet: &[u8],
     ) -> Result<PacketFlags, NetChannelError> {
         let sequence = reader.read_in::<32, i32>()?;
@@ -838,7 +841,7 @@ impl NetChannel {
     fn check_challenge(
         &mut self,
         flags: &PacketFlags,
-        reader: &mut impl BitRead,
+        reader: &mut BitReader,
     ) -> Result<(), NetChannelError> {
         if flags.contains(PacketFlags::CHALLENGE) {
             let challenge = reader.read_in::<32, u32>()?;
@@ -889,7 +892,7 @@ impl NetChannel {
         }
     }
 
-    fn read_reliable(&mut self, reader: &mut impl BitRead) -> Result<(), NetChannelError> {
+    fn read_reliable(&mut self, reader: &mut BitReader) -> Result<(), NetChannelError> {
         let subchannel_index = reader.read_in::<3, u8>()?;
 
         for stream in StreamType::iter() {
@@ -907,7 +910,7 @@ impl NetChannel {
 
     fn read_subchannel_data(
         &mut self,
-        reader: &mut impl BitRead,
+        reader: &mut BitReader,
         stream: StreamType,
     ) -> Result<(), NetChannelError> {
         let mut start_fragment = 0;
@@ -960,7 +963,7 @@ impl NetChannel {
             let (transfer_type, data) = transfer.data()?;
             match transfer_type {
                 TransferType::Message => {
-                    let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+                    let mut reader = BitReader::new(&data);
                     read_messages(&mut reader, self.side, messages)?
                 }
                 TransferType::File {
@@ -979,7 +982,7 @@ impl NetChannel {
     /// Write a single packet. Any messages in `messages` will be sent as
     /// unreliable messages in the packet.
     pub fn write_packet(&mut self, messages: &[NetMessage]) -> Result<Vec<u8>, NetChannelError> {
-        let mut writer = BitWriter::endian(Cursor::new(Vec::<u8>::new()), LittleEndian);
+        let mut writer = BitWriter::new();
         let mut flags = self.write_header(&mut writer)?;
 
         if self.write_reliable(&mut writer)? {
@@ -989,7 +992,7 @@ impl NetChannel {
         write_messages(&mut writer, messages)?;
         writer.byte_align()?;
 
-        let mut packet_bytes = writer.into_writer().into_inner();
+        let mut packet_bytes = writer.into_bytes();
 
         // Fill in flags & checksum
         packet_bytes[FLAGS_OFFSET] = flags.bits();
@@ -1003,7 +1006,7 @@ impl NetChannel {
 
     /// Write out the packet header. Dummy values are written to the packet
     /// flags and checksum, they *must* be properly filled in later.
-    fn write_header(&mut self, writer: &mut impl BitWrite) -> Result<PacketFlags, NetChannelError> {
+    fn write_header(&mut self, writer: &mut BitWriter) -> Result<PacketFlags, NetChannelError> {
         let mut flags = PacketFlags::empty();
 
         writer.write_out::<32, i32>(self.out_sequence_nr)?;
@@ -1032,7 +1035,7 @@ impl NetChannel {
 
     /// Write out the reliable data for a packet. Returns `true` if data has
     /// been written.
-    fn write_reliable(&mut self, writer: &mut impl BitWrite) -> Result<bool, NetChannelError> {
+    fn write_reliable(&mut self, writer: &mut BitWriter) -> Result<bool, NetChannelError> {
         self.fill_free_subchannel()?;
 
         let Some(subchannel_index) = self.find_subchannel(SubchannelStateType::WaitingToSend)
@@ -1075,13 +1078,16 @@ impl NetChannel {
         &mut self,
         messages: &[NetMessage],
     ) -> Result<(), NetChannelError> {
-        let mut data = vec![];
-        let mut writer = BitWriter::endian(Cursor::new(&mut data), LittleEndian);
+        let mut writer = BitWriter::new();
 
         write_messages(&mut writer, messages)?;
         writer.byte_align()?;
 
-        self.queue_reliable_transfer(StreamType::Message, TransferType::Message, data)?;
+        self.queue_reliable_transfer(
+            StreamType::Message,
+            TransferType::Message,
+            writer.into_bytes(),
+        )?;
 
         Ok(())
     }
@@ -1271,7 +1277,7 @@ mod tests {
 
     #[test]
     fn test_reliable_read_header_single_block() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let mut writer = BitWriter::new();
 
         writer.write_bit(true).unwrap(); // is compressed
         writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
@@ -1280,8 +1286,8 @@ mod tests {
 
         writer.byte_align().unwrap();
 
-        let data = writer.into_writer().into_inner();
-        let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new(&data);
 
         let transfer = IncomingReliableTransfer::new_from_header(&mut reader, false).unwrap();
         assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
@@ -1292,7 +1298,7 @@ mod tests {
 
     #[test]
     fn test_reliable_read_header_multi_block() {
-        let mut writer = BitWriter::endian(Cursor::new(vec![]), LittleEndian);
+        let mut writer = BitWriter::new();
 
         writer.write_bit(true).unwrap(); // is file
         writer.write_out::<32, u32>(9999).unwrap();
@@ -1306,8 +1312,8 @@ mod tests {
 
         writer.byte_align().unwrap();
 
-        let data = writer.into_writer().into_inner();
-        let mut reader = BitReader::endian(Cursor::new(&data), LittleEndian);
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new(&data);
 
         let transfer = IncomingReliableTransfer::new_from_header(&mut reader, true).unwrap();
         assert_eq!(transfer.buffer.len(), 1234); // buffer size should be compressed size
@@ -1340,7 +1346,7 @@ mod tests {
             test_buffer.push(i as u8);
         }
 
-        let mut reader = BitReader::endian(Cursor::new(&test_buffer), LittleEndian);
+        let mut reader = BitReader::new(&test_buffer);
 
         transfer.read_data(&mut reader, 0, 0).unwrap();
 
@@ -1367,7 +1373,7 @@ mod tests {
             test_buffer.push(i as u8);
         }
 
-        let mut reader = BitReader::endian(Cursor::new(&test_buffer), LittleEndian);
+        let mut reader = BitReader::new(&test_buffer);
 
         // Send the transfer in 2 chunks
         let half_fragments = bytes_to_fragments(BUFFER_SIZE.into()) / 2;
