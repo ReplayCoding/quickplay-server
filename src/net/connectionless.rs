@@ -192,7 +192,7 @@ impl Message<ConnectionlessError> for S2C_Challenge {
         writer.write_out::<32, _>(self.server_challenge)?;
         writer.write_out::<32, _>(self.client_challenge)?;
 
-        writer.write_out::<32, _>(match self.auth_protocol {
+        writer.write_out::<32, u32>(match self.auth_protocol {
             AuthProtocolType::AuthCertificate => 1,
             AuthProtocolType::HashedCdKey => 2,
             AuthProtocolType::Steam => 3,

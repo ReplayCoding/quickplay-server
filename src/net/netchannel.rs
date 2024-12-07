@@ -129,10 +129,10 @@ impl<T: Copy + std::ops::Add<Output = T>> LengthRange<T> {
     }
 }
 
-const FRAGMENT_BITS: u32 = 8;
+const FRAGMENT_BITS: u8 = 8;
 const FRAGMENT_SIZE: u32 = 1 << FRAGMENT_BITS;
 
-const MAX_FILE_SIZE_BITS: u32 = 26;
+const MAX_FILE_SIZE_BITS: u8 = 26;
 const MAX_FILE_SIZE: u32 = (1 << MAX_FILE_SIZE_BITS) - 1;
 
 const PATH_OSMAX: usize = 260;
@@ -235,7 +235,7 @@ impl OutgoingReliableTransfer {
     }
 }
 
-const SUBCHANNEL_FRAGMENT_COUNT_BITS: u32 = 3;
+const SUBCHANNEL_FRAGMENT_COUNT_BITS: u8 = 3;
 // TODO: What is a reasonable size for this?
 const SUBCHANNEL_MAX_SEND_SIZE: u32 = u32::MAX;
 const MAX_SUBCHANNELS: usize = 8;
@@ -787,8 +787,8 @@ impl NetChannel {
         reader: &mut BitReader,
         packet: &[u8],
     ) -> Result<PacketFlags, NetChannelError> {
-        let sequence = reader.read_in::<32, i32>()?;
-        let sequence_ack = reader.read_in::<32, i32>()?;
+        let sequence = reader.read_in::<32, u32>()? as i32;
+        let sequence_ack = reader.read_in::<32, u32>()? as i32;
         let flags: PacketFlags = PacketFlags::from_bits_truncate(reader.read_in::<8, u8>()?);
         trace!(
             "got packet with sequence {sequence}, acked sequence {sequence_ack}, flags {flags:?}"
@@ -801,7 +801,7 @@ impl NetChannel {
 
         let mut num_choked: i32 = 0;
         if flags.contains(PacketFlags::CHOKED) {
-            num_choked = reader.read_in::<8, i32>()?;
+            num_choked = reader.read_in::<8, u32>()? as i32;
         }
 
         self.check_challenge(&flags, reader)?;
@@ -1009,8 +1009,8 @@ impl NetChannel {
     fn write_header(&mut self, writer: &mut BitWriter) -> Result<PacketFlags, NetChannelError> {
         let mut flags = PacketFlags::empty();
 
-        writer.write_out::<32, i32>(self.out_sequence_nr)?;
-        writer.write_out::<32, i32>(self.in_sequence_nr)?;
+        writer.write_out::<32, u32>(self.out_sequence_nr as u32)?;
+        writer.write_out::<32, u32>(self.in_sequence_nr as u32)?;
 
         // Write out a dummy flags value, will be filled in later.
         writer.write_out::<8, u8>(0xaa)?;

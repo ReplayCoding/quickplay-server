@@ -10,7 +10,7 @@ use super::{
     usercmd::UserCmd,
 };
 
-pub const NETMSG_TYPE_BITS: u32 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
+pub const NETMSG_TYPE_BITS: u8 = 6; // must be 2^NETMSG_TYPE_BITS > SVC_LASTMSG
 
 #[derive(Error, Debug)]
 pub enum NetMessageError {
@@ -136,7 +136,7 @@ impl Message<NetMessageError> for SetConVars {
 #[derive(Debug, PartialEq)]
 pub struct SignonState {
     pub signon_state: u8,
-    pub spawn_count: i32,
+    pub spawn_count: u32,
 }
 
 impl Message<NetMessageError> for SignonState {
@@ -148,7 +148,7 @@ impl Message<NetMessageError> for SignonState {
         Self: Sized,
     {
         let signon_state = reader.read_in::<8, u8>()?;
-        let spawn_count = reader.read_in::<32, i32>()?;
+        let spawn_count = reader.read_in::<32, u32>()?;
 
         Ok(Self {
             signon_state,
@@ -353,10 +353,10 @@ impl Message<NetMessageError> for Tick {
 }
 
 /// Largest # of commands to send in a packet
-const NUM_NEW_COMMAND_BITS: u32 = 4;
+const NUM_NEW_COMMAND_BITS: u8 = 4;
 
 /// Max number of history commands to send ( 2 by default ) in case of dropped packets
-const NUM_BACKUP_COMMAND_BITS: u32 = 3;
+const NUM_BACKUP_COMMAND_BITS: u8 = 3;
 
 #[derive(Debug, PartialEq)]
 pub struct Move {

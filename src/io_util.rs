@@ -5,7 +5,7 @@ use crate::bitstream::BitWriter;
 
 pub fn write_string(writer: &mut BitWriter, string: &str) -> io::Result<()> {
     writer.write_bytes(string.as_bytes())?;
-    writer.write_out::<8, _>(0)?; // write NUL terminator
+    writer.write_out::<8, u8>(0)?; // write NUL terminator
 
     io::Result::Ok(())
 }

@@ -36,8 +36,8 @@ macro_rules! read_optional {
 }
 
 /// TODO: move this out of here
-const MAX_EDICT_BITS: u32 = 11;
-const WEAPON_SUBTYPE_BITS: u32 = 6;
+const MAX_EDICT_BITS: u8 = 11;
+const WEAPON_SUBTYPE_BITS: u8 = 6;
 
 impl UserCmd {
     /// Read a single UserCmd
