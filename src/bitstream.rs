@@ -61,3 +61,26 @@ impl BitWriter {
         self.writer.into_writer()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_roundtrip() {
+        let mut writer = BitWriter::new();
+
+        writer.write_out::<24, u32>(0x12_34_56).unwrap();
+        writer.write_out::<3, u32>(0b011).unwrap();
+        writer.write_out::<9, u32>(0b1_1001_1010).unwrap();
+        writer.write_out::<32, u32>(0x41_42_43_44).unwrap();
+        writer.byte_align().unwrap();
+
+        let data = writer.into_bytes();
+        let mut reader = BitReader::new(&data);
+        assert_eq!(0x12_34_56, reader.read_in::<24, u32>().unwrap());
+        assert_eq!(0b011, reader.read_in::<3, u32>().unwrap());
+        assert_eq!(0b1_1001_1010, reader.read_in::<9, u32>().unwrap());
+        assert_eq!(0x41_42_43_44, reader.read_in::<32, u32>().unwrap());
+    }
+}
