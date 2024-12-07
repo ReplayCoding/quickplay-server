@@ -167,16 +167,27 @@ mod tests {
         let mut writer = BitWriter::new();
 
         writer.write_out::<24, u32>(0x12_34_56).unwrap();
+        writer.write_bit(true).unwrap();
         writer.write_out::<3, u32>(0b011).unwrap();
         writer.write_out::<9, u32>(0b1_1001_1010).unwrap();
+
+        let some_bytes_reference: [u8; 8] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48];
+        writer.write_bytes(&some_bytes_reference).unwrap();
+
         writer.write_out::<32, u32>(0x41_42_43_44).unwrap();
         writer.byte_align().unwrap();
 
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);
         assert_eq!(0x12_34_56, reader.read_in::<24, u32>().unwrap());
+        assert_eq!(true, reader.read_bit().unwrap());
         assert_eq!(0b011, reader.read_in::<3, u32>().unwrap());
         assert_eq!(0b1_1001_1010, reader.read_in::<9, u32>().unwrap());
+
+        let mut some_bytes_actual = [0u8; 8];
+        reader.read_bytes(&mut some_bytes_actual).unwrap();
+        assert!(some_bytes_actual == some_bytes_reference);
+
         assert_eq!(0x41_42_43_44, reader.read_in::<32, u32>().unwrap());
     }
 
