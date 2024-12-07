@@ -247,4 +247,17 @@ mod tests {
         assert_eq!(reader.cache, 0x6);
         assert_eq!(reader.cache_bits, 4);
     }
+
+    #[test]
+    fn test_reader_overflow() {
+        let bytes = [0x41, 0x42, 0x43, 0x44];
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read_in::<16, u16>().unwrap(), 0x42_41);
+        // Reading too many bits should fail
+        assert!(reader.read_in::<17, u32>().is_err());
+        // If the reader returns an overflow error, it should move the position
+        assert_eq!(reader.read_in::<16, u16>().unwrap(), 0x44_43);
+        // Check exact edge cases around the end of the stream
+        assert!(reader.read_in::<1, u8>().is_err());
+    }
 }
