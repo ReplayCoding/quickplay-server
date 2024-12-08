@@ -172,7 +172,7 @@ impl BitWriter {
             let mask = HalfCache::MAX;
             let half_cache = (self.cache & Cache::from(mask)) as HalfCache;
             // NOTE: unwrap is fine here, because we're operating on a Vec.
-            self.data.write(&half_cache.to_le_bytes()).unwrap();
+            self.data.write_all(&half_cache.to_le_bytes()).unwrap();
             self.cache >>= HalfCache::BITS;
             self.cache_bits -= HalfCache::BITS as u8;
         }
@@ -192,7 +192,7 @@ impl BitWriter {
             let num_bytes = self.cache_bits.div_ceil(8);
             // NOTE: unwrap is fine here, because we're operating on a Vec.
             self.data
-                .write(&masked_data.to_le_bytes()[..usize::from(num_bytes)])
+                .write_all(&masked_data.to_le_bytes()[..usize::from(num_bytes)])
                 .unwrap();
 
             self.cache >>= num_bytes * 8;
