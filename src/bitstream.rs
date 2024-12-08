@@ -161,6 +161,10 @@ impl BitWriter {
         }
     }
 
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
     /// If the cache has `>= HalfCache::BITS` bits, write those bits to
     /// `self.data`
     fn flush_aligned(&mut self) {
@@ -394,5 +398,16 @@ mod tests {
         assert!(writer.data == [0x41, 0x42, 0x43, 0x44, 0x45]);
         assert_eq!(writer.cache, 0);
         assert_eq!(writer.cache_bits, 0);
+    }
+
+    #[test]
+    fn test_writer_position() {
+        let mut writer = BitWriter::new();
+        writer.write_out::<16, u16>(0x4241).unwrap();
+        assert_eq!(writer.position(), 16);
+        writer.write_out::<8, u8>(0x43).unwrap();
+        assert_eq!(writer.position(), 24);
+        writer.write_out::<20, u32>(0x0F_45_44).unwrap();
+        assert_eq!(writer.position(), 44);
     }
 }
