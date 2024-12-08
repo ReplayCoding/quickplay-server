@@ -12,7 +12,6 @@ panic = "abort"
 anyhow = "1.0.86"
 argh = "0.1.12"
 bitflags = "2.6.0"
-bitstream-io = "2.5.0"
 crc = "3.2.1"
 num_enum = "0.7.3"
 serde = { version = "1.0.210", features = ["derive"] }
