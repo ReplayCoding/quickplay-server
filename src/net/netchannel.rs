@@ -990,7 +990,6 @@ impl NetChannel {
         }
 
         write_messages(&mut writer, messages)?;
-        writer.byte_align()?;
 
         let mut packet_bytes = writer.into_bytes();
 
@@ -1081,7 +1080,6 @@ impl NetChannel {
         let mut writer = BitWriter::new();
 
         write_messages(&mut writer, messages)?;
-        writer.byte_align()?;
 
         self.queue_reliable_transfer(
             StreamType::Message,
@@ -1284,8 +1282,6 @@ mod tests {
 
         write_varint32(&mut writer, 1234).unwrap(); // size
 
-        writer.byte_align().unwrap();
-
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);
 
@@ -1309,8 +1305,6 @@ mod tests {
         writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
 
         writer.write_out::<MAX_FILE_SIZE_BITS, u32>(1234).unwrap(); // size
-
-        writer.byte_align().unwrap();
 
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);

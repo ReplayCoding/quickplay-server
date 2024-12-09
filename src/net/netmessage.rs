@@ -507,8 +507,6 @@ mod tests {
 
         write_messages(&mut writer, expected_message).unwrap();
 
-        writer.byte_align().unwrap();
-
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);
         let mut messages = vec![];
@@ -530,8 +528,6 @@ mod tests {
         ];
 
         write_messages(&mut writer, expected_messages).unwrap();
-
-        writer.byte_align().unwrap();
 
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);

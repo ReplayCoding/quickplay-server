@@ -234,13 +234,9 @@ impl BitWriter {
         Ok(())
     }
 
-    pub fn byte_align(&mut self) -> std::io::Result<()> {
-        self.flush_all();
-        Ok(())
-    }
-
     pub fn into_bytes(mut self) -> Vec<u8> {
         self.flush_all();
+
         self.data
     }
 }
@@ -277,7 +273,6 @@ mod tests {
             writer.write_bytes(&some_bytes_reference).unwrap();
 
             writer.write_out::<32, u32>(0x41_42_43_44).unwrap();
-            writer.byte_align().unwrap();
 
             let data = writer.into_bytes();
             let mut reader = BitReader::new(&data);
