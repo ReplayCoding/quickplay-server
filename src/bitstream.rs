@@ -1,5 +1,3 @@
-use std::io::Write;
-
 type Cache = u64;
 type HalfCache = u32;
 const _: () = assert!(
@@ -139,9 +137,32 @@ impl<'a> BitReader<'a> {
     }
 }
 
+/// Load as many bytes as possible into a HalfCache-sized integer
+fn load_partial_half_cache(data: &[u8], offset: usize) -> HalfCache {
+    assert!(offset <= data.len());
+    let num_bytes_left = data.len() - offset;
+    let num_bytes_to_read = num_bytes_left.min(size_of::<HalfCache>());
+
+    let mut half_cache = [0u8; size_of::<HalfCache>()];
+    half_cache[..num_bytes_to_read].copy_from_slice(&data[offset..offset + num_bytes_to_read]);
+    HalfCache::from_le_bytes(half_cache)
+}
+
+fn write_to_vec(vector: &mut Vec<u8>, from: &[u8], offset: usize) {
+    assert!(offset <= vector.len());
+
+    // Make sure that the new data will fit into the vector
+    let end = offset + from.len();
+    vector.resize(end.max(vector.len()), 0);
+
+    vector[offset..end].copy_from_slice(from);
+}
+
 pub struct BitWriter {
     /// The bytes that have been written, excluding any bytes in the cache
     data: Vec<u8>,
+    /// The position of the flushed cursor, in bytes
+    flushed_position: usize,
     /// The position of the stream in bits
     position: usize,
 
@@ -155,10 +176,22 @@ impl BitWriter {
     pub fn new() -> Self {
         Self {
             data: vec![],
+            flushed_position: 0,
             position: 0,
             cache: 0,
             cache_bits: 0,
         }
+    }
+
+    fn set_position(&mut self, position: usize) {
+        self.flush_all();
+
+        self.flushed_position = position / 8;
+        self.position = position;
+
+        let bits = position % 8;
+        self.cache = Cache::from(load_partial_half_cache(&self.data, self.flushed_position));
+        self.cache_bits = bits as u8;
     }
 
     pub fn position(&self) -> usize {
@@ -171,32 +204,40 @@ impl BitWriter {
         if HalfCache::from(self.cache_bits) >= HalfCache::BITS {
             let mask = HalfCache::MAX;
             let half_cache = (self.cache & Cache::from(mask)) as HalfCache;
-            // NOTE: unwrap is fine here, because we're operating on a Vec.
-            self.data.write_all(&half_cache.to_le_bytes()).unwrap();
+            write_to_vec(
+                &mut self.data,
+                &half_cache.to_le_bytes(),
+                self.flushed_position,
+            );
             self.cache >>= HalfCache::BITS;
             self.cache_bits -= HalfCache::BITS as u8;
+            self.flushed_position += size_of::<HalfCache>();
         }
     }
 
     /// Flush all bits in the cache to `data`. Any data that is not byte-aligned
     /// will be padded with zeroes.
+    /// NOTE: Will corrupt the state of the cache, so make sure to reset state
+    /// if you call this.
     fn flush_all(&mut self) {
         self.flush_aligned();
 
-        // TODO: this is suspiciously similar to flush_aligned, merge these!
         if self.cache_bits > 0 {
             assert!(u32::from(self.cache_bits) <= HalfCache::BITS);
+
             let mask = ((1 as Cache) << self.cache_bits) - 1;
             let masked_data = (self.cache & mask) as HalfCache;
+            let previous_data =
+                load_partial_half_cache(&self.data, self.flushed_position) & (!mask as HalfCache);
+
+            let combined_data = previous_data | masked_data;
 
             let num_bytes = self.cache_bits.div_ceil(8);
-            // NOTE: unwrap is fine here, because we're operating on a Vec.
-            self.data
-                .write_all(&masked_data.to_le_bytes()[..usize::from(num_bytes)])
-                .unwrap();
-
-            self.cache >>= num_bytes * 8;
-            self.cache_bits = 0;
+            write_to_vec(
+                &mut self.data,
+                &combined_data.to_le_bytes()[..usize::from(num_bytes)],
+                self.flushed_position,
+            );
         }
     }
 
@@ -212,9 +253,19 @@ impl BitWriter {
             );
         }
 
-        assert!(u32::from(self.cache_bits) <= HalfCache::BITS);
+        let value = value.to_half_cache();
 
-        self.cache |= (value.to_half_cache() as Cache) << self.cache_bits;
+        assert!(u32::from(self.cache_bits) <= HalfCache::BITS);
+        // FIXME: this shouldn't be an assertion
+        assert!(
+            (HalfCache::BITS - value.leading_zeros()) <= u32::from(BITS),
+            "value does not fit into specified number of bits"
+        );
+
+        let mask = (Cache::from(1u8) << BITS) - 1;
+        // Clear out any bits that were here previously
+        self.cache &= !(mask << self.cache_bits);
+        self.cache |= (value as Cache) << self.cache_bits;
         self.cache_bits += BITS;
         self.position += usize::from(BITS);
         self.flush_aligned();
@@ -381,18 +432,12 @@ mod tests {
         assert_eq!(writer.cache, 0x45);
         assert_eq!(writer.cache_bits, 8);
 
-        writer.flush_all();
-        assert!(writer.data == [0x41, 0x42, 0x43, 0x44, 0x45]);
-        assert_eq!(writer.cache, 0);
-        assert_eq!(writer.cache_bits, 0);
+        assert!(writer.into_bytes() == [0x41, 0x42, 0x43, 0x44, 0x45]);
 
-        writer.data.clear();
+        let mut writer = BitWriter::new();
         writer.cache = 0x45_44_43_42_41;
         writer.cache_bits = 40;
-        writer.flush_all();
-        assert!(writer.data == [0x41, 0x42, 0x43, 0x44, 0x45]);
-        assert_eq!(writer.cache, 0);
-        assert_eq!(writer.cache_bits, 0);
+        assert!(writer.into_bytes() == [0x41, 0x42, 0x43, 0x44, 0x45]);
     }
 
     #[test]
@@ -404,5 +449,35 @@ mod tests {
         assert_eq!(writer.position(), 24);
         writer.write_out::<20, u32>(0x0F_45_44).unwrap();
         assert_eq!(writer.position(), 44);
+    }
+
+    #[test]
+    fn test_writer_set_position() {
+        let mut writer = BitWriter::new();
+        writer.write_out::<20, u32>(0x4241).unwrap();
+        writer.write_out::<4, u8>(0xD).unwrap();
+        writer.write_out::<3, u8>(5).unwrap();
+        writer.write_out::<5, u8>(0x10).unwrap();
+        writer.write_out::<24, u32>(0x55_aa_55).unwrap();
+        let old_position = writer.position();
+
+        writer.set_position(20);
+        writer.write_out::<4, u8>(0x02).unwrap();
+        writer.write_out::<3, u8>(0x4).unwrap();
+
+        writer.set_position(old_position);
+        writer.write_out::<32, u32>(0x12345678).unwrap();
+        writer.set_position(writer.position() - 16);
+        writer.write_out::<16, u32>(0xf1_f2).unwrap();
+
+        let bytes = writer.into_bytes();
+
+        let mut reader = BitReader::new(&bytes);
+        assert_eq!(reader.read_in::<20, u32>().unwrap(), 0x4241);
+        assert_eq!(reader.read_in::<4, u8>().unwrap(), 0x02);
+        assert_eq!(reader.read_in::<3, u8>().unwrap(), 0x04);
+        assert_eq!(reader.read_in::<5, u8>().unwrap(), 0x10);
+        assert_eq!(reader.read_in::<24, u32>().unwrap(), 0x55_aa_55);
+        assert_eq!(reader.read_in::<32, u32>().unwrap(), 0xf1f2_5678);
     }
 }
