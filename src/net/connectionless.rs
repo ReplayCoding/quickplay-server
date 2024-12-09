@@ -6,7 +6,7 @@ use strum::EnumDiscriminants;
 use thiserror::Error;
 
 use crate::{
-    bitstream::{BitReader, BitWriter},
+    bitstream::{BitReader, BitStreamError, BitWriter},
     io_util::{read_string, write_string},
 };
 
@@ -25,8 +25,8 @@ pub enum ConnectionlessError {
     InvalidMagicVersion(u32),
     #[error("unknown message {}, receiving from side {1:?}", *.0 as char)]
     UnknownMessage(u8, MessageSide),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("bitstream error: {0}")]
+    BitStream(#[from] BitStreamError),
 }
 
 #[derive(Debug)]

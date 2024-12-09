@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, ops::Range};
 
 use crate::{
-    bitstream::{BitReader, BitWriter},
+    bitstream::{BitReader, BitStreamError, BitWriter},
     io_util,
 };
 
@@ -18,8 +18,8 @@ use tracing::trace;
 
 #[derive(Error, Debug)]
 pub enum NetChannelError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("bitstream error: {0}")]
+    BitStream(#[from] BitStreamError),
     #[error("invalid checksum, expected {expected:04x}, got {actual:04x}")]
     InvalidChecksum { expected: u16, actual: u16 },
     #[error("mismatched challenge, expected {expected:08x}, got {actual:08x}")]

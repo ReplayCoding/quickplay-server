@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::{
-    bitstream::{BitReader, BitWriter},
+    bitstream::{BitReader, BitStreamError, BitWriter},
     io_util::{read_string, write_string},
 };
 
@@ -18,8 +18,8 @@ pub enum NetMessageError {
     UnknownMessage(u8, MessageSide),
     #[error("too many convars: {0}")]
     TooManyConVars(usize),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("bitstream error: {0}")]
+    BitStream(#[from] BitStreamError),
 }
 
 #[derive(Debug, PartialEq)]
@@ -461,7 +461,7 @@ pub fn read_messages(
 
                 messages.push(message);
             }
-            Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(ref e) if matches!(e, BitStreamError::UnexpectedEof) => break,
             Err(e) => return Err(e.into()),
         }
     }

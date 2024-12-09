@@ -1,3 +1,5 @@
+use thiserror::Error;
+
 type Cache = u64;
 type HalfCache = u32;
 const _: () = assert!(
@@ -35,6 +37,16 @@ macro_rules! impl_numeric {
 impl_numeric!(u8);
 impl_numeric!(u16);
 impl_numeric!(u32);
+
+#[derive(Error, Debug)]
+pub enum BitStreamError {
+    #[error("Unexpected EOF")]
+    UnexpectedEof,
+    #[error("Out-of-bounds seek")]
+    OutOfBoundsSeek,
+    #[error("Value cannot fit into specified number of bits")]
+    ValueTooLarge,
+}
 
 pub struct BitReader<'a> {
     /// The data the bitstream will be read from
@@ -99,12 +111,12 @@ impl<'a> BitReader<'a> {
         value as HalfCache
     }
 
-    pub fn read_bit(&mut self) -> std::io::Result<bool> {
+    pub fn read_bit(&mut self) -> Result<bool, BitStreamError> {
         // TODO: can this be optimized?
         Ok(self.read_in::<1, u8>()? != 0)
     }
 
-    pub fn read_bytes(&mut self, data: &mut [u8]) -> std::io::Result<()> {
+    pub fn read_bytes(&mut self, data: &mut [u8]) -> Result<(), BitStreamError> {
         // TODO: optimize
         for byte in data {
             *byte = self.read_in::<8, u8>()?;
@@ -113,7 +125,7 @@ impl<'a> BitReader<'a> {
         Ok(())
     }
 
-    pub fn read_in<const BITS: u8, Type: Numeric>(&mut self) -> std::io::Result<Type> {
+    pub fn read_in<const BITS: u8, Type: Numeric>(&mut self) -> Result<Type, BitStreamError> {
         const {
             assert!(
                 BITS as u32 <= HalfCache::BITS,
@@ -129,7 +141,7 @@ impl<'a> BitReader<'a> {
             self.refill();
             // Couldn't get any more :(
             if BITS > self.cache_bits {
-                return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+                return Err(BitStreamError::UnexpectedEof);
             }
         }
 
@@ -139,7 +151,6 @@ impl<'a> BitReader<'a> {
 
 /// Load as many bytes as possible into a HalfCache-sized integer
 fn load_partial_half_cache(data: &[u8], offset: usize) -> HalfCache {
-    assert!(offset <= data.len());
     let num_bytes_left = data.len() - offset;
     let num_bytes_to_read = num_bytes_left.min(size_of::<HalfCache>());
 
@@ -149,8 +160,6 @@ fn load_partial_half_cache(data: &[u8], offset: usize) -> HalfCache {
 }
 
 fn write_to_vec(vector: &mut Vec<u8>, from: &[u8], offset: usize) {
-    assert!(offset <= vector.len());
-
     // Make sure that the new data will fit into the vector
     let end = offset + from.len();
     vector.resize(end.max(vector.len()), 0);
@@ -183,8 +192,15 @@ impl BitWriter {
         }
     }
 
-    fn set_position(&mut self, position: usize) {
+    fn set_position(&mut self, position: usize) -> Result<(), BitStreamError> {
         self.flush_all();
+
+        // NOTE: Since flush_all byte aligns the stream, this allows seeks
+        // slightly past the previous highest written bit position. In practice
+        // this shouldn't matter, since it will still be in bounds.
+        if self.data.len() < position.div_ceil(8) {
+            return Err(BitStreamError::OutOfBoundsSeek);
+        }
 
         self.flushed_position = position / 8;
         self.position = position;
@@ -192,6 +208,8 @@ impl BitWriter {
         let bits = position % 8;
         self.cache = Cache::from(load_partial_half_cache(&self.data, self.flushed_position));
         self.cache_bits = bits as u8;
+
+        Ok(())
     }
 
     pub fn position(&self) -> usize {
@@ -241,7 +259,10 @@ impl BitWriter {
         }
     }
 
-    pub fn write_out<const BITS: u8, Type: Numeric>(&mut self, value: Type) -> std::io::Result<()> {
+    pub fn write_out<const BITS: u8, Type: Numeric>(
+        &mut self,
+        value: Type,
+    ) -> Result<(), BitStreamError> {
         const {
             assert!(
                 BITS as u32 <= HalfCache::BITS,
@@ -257,10 +278,9 @@ impl BitWriter {
 
         assert!(u32::from(self.cache_bits) <= HalfCache::BITS);
         // FIXME: this shouldn't be an assertion
-        assert!(
-            (HalfCache::BITS - value.leading_zeros()) <= u32::from(BITS),
-            "value does not fit into specified number of bits"
-        );
+        if (HalfCache::BITS - value.leading_zeros()) > u32::from(BITS) {
+            return Err(BitStreamError::ValueTooLarge);
+        }
 
         let mask = (Cache::from(1u8) << BITS) - 1;
         // Clear out any bits that were here previously
@@ -273,11 +293,11 @@ impl BitWriter {
         Ok(())
     }
 
-    pub fn write_bit(&mut self, value: bool) -> std::io::Result<()> {
+    pub fn write_bit(&mut self, value: bool) -> Result<(), BitStreamError> {
         self.write_out::<1, u8>(value as u8)
     }
 
-    pub fn write_bytes(&mut self, data: &[u8]) -> std::io::Result<()> {
+    pub fn write_bytes(&mut self, data: &[u8]) -> Result<(), BitStreamError> {
         for byte in data {
             self.write_out::<8, u8>(*byte)?;
         }
@@ -458,16 +478,16 @@ mod tests {
         writer.write_out::<4, u8>(0xD).unwrap();
         writer.write_out::<3, u8>(5).unwrap();
         writer.write_out::<5, u8>(0x10).unwrap();
-        writer.write_out::<24, u32>(0x55_aa_55).unwrap();
+        writer.write_out::<25, u32>(0x55_aa_55).unwrap();
         let old_position = writer.position();
 
-        writer.set_position(20);
+        writer.set_position(20).unwrap();
         writer.write_out::<4, u8>(0x02).unwrap();
         writer.write_out::<3, u8>(0x4).unwrap();
 
-        writer.set_position(old_position);
+        writer.set_position(old_position).unwrap();
         writer.write_out::<32, u32>(0x12345678).unwrap();
-        writer.set_position(writer.position() - 16);
+        writer.set_position(writer.position() - 16).unwrap();
         writer.write_out::<16, u32>(0xf1_f2).unwrap();
 
         let bytes = writer.into_bytes();
@@ -477,7 +497,7 @@ mod tests {
         assert_eq!(reader.read_in::<4, u8>().unwrap(), 0x02);
         assert_eq!(reader.read_in::<3, u8>().unwrap(), 0x04);
         assert_eq!(reader.read_in::<5, u8>().unwrap(), 0x10);
-        assert_eq!(reader.read_in::<24, u32>().unwrap(), 0x55_aa_55);
+        assert_eq!(reader.read_in::<25, u32>().unwrap(), 0x55_aa_55);
         assert_eq!(reader.read_in::<32, u32>().unwrap(), 0xf1f2_5678);
     }
 }

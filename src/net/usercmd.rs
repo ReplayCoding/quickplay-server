@@ -1,4 +1,4 @@
-use crate::bitstream::BitReader;
+use crate::bitstream::{BitReader, BitStreamError};
 
 /// A single UserCmd. UserCmds are delta-compressed, so all of these are
 /// Option<_>.
@@ -41,7 +41,7 @@ const WEAPON_SUBTYPE_BITS: u8 = 6;
 
 impl UserCmd {
     /// Read a single UserCmd
-    pub fn read(reader: &mut BitReader) -> std::io::Result<Self> {
+    pub fn read(reader: &mut BitReader) -> Result<Self, BitStreamError> {
         let command_nr = read_optional!(reader, reader.read_in::<32, u32>()?);
         let tick_count = read_optional!(reader, reader.read_in::<32, u32>()?);
 

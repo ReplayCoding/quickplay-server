@@ -1,16 +1,17 @@
 use std::io;
 
 use crate::bitstream::BitReader;
+use crate::bitstream::BitStreamError;
 use crate::bitstream::BitWriter;
 
-pub fn write_string(writer: &mut BitWriter, string: &str) -> io::Result<()> {
+pub fn write_string(writer: &mut BitWriter, string: &str) -> Result<(), BitStreamError> {
     writer.write_bytes(string.as_bytes())?;
     writer.write_out::<8, u8>(0)?; // write NUL terminator
 
-    io::Result::Ok(())
+    Ok(())
 }
 
-pub fn read_string(reader: &mut BitReader, max_len: usize) -> io::Result<String> {
+pub fn read_string(reader: &mut BitReader, max_len: usize) -> Result<String, BitStreamError> {
     let mut data = vec![];
     let mut chars_read = 0;
     loop {
@@ -27,16 +28,12 @@ pub fn read_string(reader: &mut BitReader, max_len: usize) -> io::Result<String>
         }
     }
 
-    String::from_utf8(data).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "stream did not contain valid UTF-8",
-        )
-    })
+    // probably going to merge these functions into bitstream anyways...
+    String::from_utf8(data).map_err(|_| todo!())
 }
 
 const MAX_VARINT_32_BYTES: u32 = 5;
-pub fn read_varint32(reader: &mut BitReader) -> io::Result<u32> {
+pub fn read_varint32(reader: &mut BitReader) -> Result<u32, BitStreamError> {
     let mut result: u32 = 0;
     let mut count: u32 = 0;
 
@@ -58,7 +55,7 @@ pub fn read_varint32(reader: &mut BitReader) -> io::Result<u32> {
     Ok(result)
 }
 
-pub fn write_varint32(writer: &mut BitWriter, value: u32) -> io::Result<()> {
+pub fn write_varint32(writer: &mut BitWriter, value: u32) -> Result<(), BitStreamError> {
     let mut value = value;
 
     while value > 0x7f {
