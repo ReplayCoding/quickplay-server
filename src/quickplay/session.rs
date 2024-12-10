@@ -42,7 +42,6 @@ use tracing::trace;
 
 use crate::{
     configuration::Configuration,
-    net::netmessage::ConVar,
     quickplay::global::{Gamemodes, QuickplayGlobal, ServerInfo, ServerTags},
 };
 
@@ -240,46 +239,48 @@ impl QuickplaySession {
         }
     }
 
-    pub fn update_preferences_from_convars(&mut self, convars: &[ConVar]) -> Result<(), String> {
-        for ConVar { name, value } in convars {
-            // source doesn't let you undefine convars made with setinfo. as a
-            // workaround, if the user makes the value an empty string it will
-            // be treated as if it doesn't exist.
-            if value.is_empty() {
-                continue;
-            }
+    pub fn update_preferences_from_convar(
+        &mut self,
+        name: &str,
+        value: &str,
+    ) -> Result<(), String> {
+        // source doesn't let you undefine convars made with setinfo. as a
+        // workaround, if the user makes the value an empty string it will
+        // be treated as if it doesn't exist.
+        if value.is_empty() {
+            return Ok(());
+        }
 
-            let prefix = &self.configuration.quickplay.preference_convar_prefix;
+        let prefix = &self.configuration.quickplay.preference_convar_prefix;
 
-            if name.starts_with(prefix) {
-                let name = &name[prefix.len()..];
-                if let Err(err_type) = self.preferences.update_preference(name, value) {
-                    return Err(match err_type {
-                        PreferenceDecodeError::UnparseableValue => {
-                            format!("Could not decode value for preference \"{name}\": \"{value}\"")
-                        }
-                        PreferenceDecodeError::InvalidValue => {
-                            format!("Invalid value for preference \"{name}\": \"{value}\"")
-                        }
-                        PreferenceDecodeError::UnknownPreference => {
-                            format!("Unknown preference \"{name}\"")
-                        }
-                    });
-                };
-            }
+        if name.starts_with(prefix) {
+            let name = &name[prefix.len()..];
+            if let Err(err_type) = self.preferences.update_preference(name, value) {
+                return Err(match err_type {
+                    PreferenceDecodeError::UnparseableValue => {
+                        format!("Could not decode value for preference \"{name}\": \"{value}\"")
+                    }
+                    PreferenceDecodeError::InvalidValue => {
+                        format!("Invalid value for preference \"{name}\": \"{value}\"")
+                    }
+                    PreferenceDecodeError::UnknownPreference => {
+                        format!("Unknown preference \"{name}\"")
+                    }
+                });
+            };
         }
 
         Ok(())
     }
 
-    pub async fn find_server(&self) -> Option<SocketAddr> {
+    pub fn find_server(&self) -> Option<SocketAddr> {
         trace!("preferences are {:#?}", self.preferences);
 
         let (must_match_tags, must_not_match_tags) = self.preferences.build_filter_tags();
 
         let mut best_server: Option<(&ServerInfo, f32)> = None;
 
-        let server_list = self.global.server_list().await;
+        let server_list = self.global.server_list();
 
         let start = std::time::Instant::now();
         for server in server_list.iter() {

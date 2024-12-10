@@ -1,9 +1,13 @@
-use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    str::FromStr,
+    sync::{Arc, RwLock, RwLockReadGuard},
+    time::Duration,
+};
 
 use bitflags::bitflags;
 use serde::Deserialize;
-use tokio::sync::{RwLock, RwLockReadGuard};
-use tokio_util::sync::{CancellationToken, DropGuard};
 use tracing::{debug, error};
 
 use crate::configuration::Configuration;
@@ -99,57 +103,47 @@ pub struct ServerInfo {
 
 pub struct QuickplayGlobal {
     servers: Arc<RwLock<Vec<ServerInfo>>>,
-    _cancel_guard: DropGuard,
 }
 
 impl QuickplayGlobal {
     pub fn new(configuration: &'static Configuration) -> Self {
-        let cancel_token = CancellationToken::new();
-        let child_token = cancel_token.child_token();
-
+        let servers = Arc::new(RwLock::new(vec![]));
         let self_ = Self {
-            servers: Arc::new(vec![].into()),
-            _cancel_guard: cancel_token.drop_guard(),
+            servers: servers.clone(),
         };
-
-        tokio::spawn(Self::run_background(
-            self_.servers.clone(),
-            configuration,
-            child_token,
-        ));
+        std::thread::spawn(move || Self::run_background(servers, configuration));
 
         self_
     }
 
-    pub async fn server_list(&self) -> RwLockReadGuard<Vec<ServerInfo>> {
-        self.servers.read().await
+    pub fn server_list(&self) -> RwLockReadGuard<Vec<ServerInfo>> {
+        self.servers.read().unwrap()
     }
 
-    async fn run_background(
+    fn run_background(
         servers: Arc<RwLock<Vec<ServerInfo>>>,
         configuration: &'static Configuration,
-        _cancel_token: CancellationToken,
     ) {
-        while !_cancel_token.is_cancelled() {
-            match Self::update_schema(configuration).await {
-                Ok(schema) => match Self::update_server_info(configuration, &schema).await {
+        loop {
+            match Self::update_schema(configuration) {
+                Ok(schema) => match Self::update_server_info(configuration, &schema) {
                     Ok(server_list) => {
-                        *servers.write().await = server_list;
+                        *servers.write().unwrap() = server_list;
                     }
                     Err(e) => error!("error while updating server list: {e}"),
                 },
                 Err(e) => error!("error while updating schema: {e}"),
             }
 
-            tokio::time::sleep(Duration::from_secs(10)).await;
+            std::thread::sleep(Duration::from_secs(10));
         }
     }
 
-    async fn update_server_info(
+    fn update_server_info(
         configuration: &Configuration,
         schema: &Schema,
     ) -> anyhow::Result<Vec<ServerInfo>> {
-        let server_list_data = tokio::fs::read(&configuration.quickplay.server_list_path).await?;
+        let server_list_data = std::fs::read(&configuration.quickplay.server_list_path)?;
         let server_list = parse_server_infos_from_json(&server_list_data, schema)?;
 
         debug!(
@@ -160,8 +154,8 @@ impl QuickplayGlobal {
         Ok(server_list)
     }
 
-    async fn update_schema(configuration: &Configuration) -> anyhow::Result<Schema> {
-        let schema_data = tokio::fs::read(&configuration.quickplay.schema_path).await?;
+    fn update_schema(configuration: &Configuration) -> anyhow::Result<Schema> {
+        let schema_data = std::fs::read(&configuration.quickplay.schema_path)?;
 
         debug!("loaded schema from file");
 

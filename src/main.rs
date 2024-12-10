@@ -3,287 +3,146 @@ mod configuration;
 mod io_util;
 mod net;
 mod quickplay;
+mod server;
 
-use std::{
-    collections::HashMap, net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Duration,
-};
+use std::net::UdpSocket;
+use std::ops::ControlFlow;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::time::{Duration, Instant};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
 
 use argh::FromArgs;
 use configuration::Configuration;
-use net::connectionless::server_machine::{
-    connectionless_server_machine, ConnectionlessServerMachineResponse,
-};
 use net::message::MessageSide;
 use net::netchannel::NetChannel;
-use net::netmessage::{Disconnect, NetMessage, StringCmd};
-use net::packet::{decode_raw_packet, Packet};
+use net::netmessage::{Disconnect, NetMessage, SetConVars, SignonState, StringCmd};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
-use tokio::{
-    net::UdpSocket,
-    sync::{
-        mpsc::{error::TryRecvError, UnboundedReceiver, UnboundedSender},
-        RwLock,
-    },
-};
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, trace, warn};
+use server::{Connection, ConnectionSetupInfo, Server};
 
-struct Connection {
+use tracing::debug;
+pub use tracing::{info, trace, warn};
+
+struct QuickplayConnection {
     socket: Arc<UdpSocket>,
     client_addr: SocketAddr,
-    packet_receiver: UnboundedReceiver<Vec<u8>>,
-    netchan: NetChannel,
-    cancel_token: CancellationToken,
+    packet_receiver: Receiver<Vec<u8>>,
+    netchannel: NetChannel,
 
     quickplay: QuickplaySession,
 
-    configuration: &'static Configuration,
+    creation_time: Instant,
+    update_interval: Duration,
+    timeout: Duration,
 }
 
-impl Connection {
-    fn new(
-        socket: Arc<UdpSocket>,
-        client_addr: SocketAddr,
-        netchan: NetChannel,
-        quickplay: Arc<QuickplayGlobal>,
-        configuration: &'static Configuration,
-    ) -> (CancellationToken, UnboundedSender<Vec<u8>>) {
-        let cancel_token = CancellationToken::new();
-
-        let (packet_sender, packet_receiver) = tokio::sync::mpsc::unbounded_channel();
-
-        let self_ = Self {
-            socket,
-            client_addr,
-            packet_receiver,
-            netchan,
-            cancel_token: cancel_token.clone(),
-
-            quickplay: QuickplaySession::new(quickplay, configuration),
-
-            configuration,
-        };
-
-        tokio::task::spawn(self_.background_worker());
-
-        (cancel_token, packet_sender)
-    }
-
-    async fn handle_packet(&mut self, data: &[u8]) -> anyhow::Result<()> {
-        let (messages, files) = self.netchan.read_packet(data)?;
-
-        for message in messages {
-            trace!("got message {:?}", message);
-            match message {
-                NetMessage::Disconnect(_) => self.cancel_token.cancel(),
-                NetMessage::SignonState(message) => {
-                    // SIGNONSTATE_CONNECTED = 2
-                    if message.signon_state != 2 {
-                        debug!("unexpected signon state {}", message.signon_state);
-                    }
-
-                    let message =
-                        if let Some(destination_server) = { self.quickplay.find_server().await } {
-                            NetMessage::StringCmd(StringCmd {
-                                command: format!("redirect {}", destination_server),
-                            })
-                        } else {
-                            NetMessage::Disconnect(Disconnect {
-                                reason: "No matches found with selected filter".to_string(),
-                            })
-                        };
-                    self.netchan.queue_reliable_messages(&[message])?;
-                }
-                NetMessage::SetConVars(message) => {
-                    if let Err(error_message) = self
-                        .quickplay
-                        .update_preferences_from_convars(&message.convars)
-                    {
-                        self.netchan
-                            .queue_reliable_messages(&[NetMessage::Disconnect(Disconnect {
-                                reason: error_message,
-                            })])?;
-                    };
-                }
-
-                _ => debug!("received unhandled message: {:?}", message),
-            }
-        }
-
-        for file in files {
-            std::fs::write(file.filename, file.data)?;
-        }
-
-        Ok(())
-    }
-
-    async fn background_worker(mut self) {
-        while !self.cancel_token.is_cancelled() {
-            // process any incoming packets
-            match self.packet_receiver.try_recv() {
-                Ok(packet) => {
-                    if let Err(err) = self.handle_packet(&packet).await {
-                        debug!("error occured while handling incoming packet: {err:?}");
-                    };
-                }
-
-                // If the channel gets disconnected, the task *should* have been
-                // cancelled, so just wait until the next iteration to leave the
-                // loop
-                Err(TryRecvError::Disconnected) | Err(TryRecvError::Empty) => {}
-            }
-
-            match self.netchan.write_packet(&[]) {
-                Ok(data) => {
-                    if let Err(err) = self.socket.send_to(&data, self.client_addr).await {
-                        warn!("error occured while sending outgoing data: {:?}", err);
-                    };
-                }
-                Err(err) => {
-                    debug!("error occured while creating outgoing packet: {:?}", err);
-                }
-            };
-
-            tokio::time::sleep(Duration::from_millis(
-                self.configuration.server.connection_update_delay,
-            ))
-            .await;
-        }
-
-        trace!("stopping background task for connection");
-    }
-}
-
-type ConnectionMap =
-    Arc<RwLock<HashMap<SocketAddr, (CancellationToken, UnboundedSender<Vec<u8>>)>>>;
-struct Server {
-    socket: Arc<UdpSocket>,
-
-    connections: ConnectionMap,
-    cancel_token: CancellationToken,
-
-    quickplay: Arc<QuickplayGlobal>,
-
-    configuration: &'static Configuration,
-}
-
-impl Server {
-    async fn new(configuration: &'static Configuration) -> anyhow::Result<Self> {
-        let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
-
-        let socket = UdpSocket::bind(bind_address).await?;
-        info!("bound to address {:?}", socket.local_addr()?);
-
-        let cancel_token = CancellationToken::new();
-
-        let server = Self {
-            connections: Arc::new(HashMap::new().into()),
-            socket: socket.into(),
-            cancel_token,
-            quickplay: Arc::new(QuickplayGlobal::new(configuration)),
-
-            configuration,
-        };
-
-        Ok(server)
-    }
-
-    async fn handle_packet(&self, from: SocketAddr, packet_data: &[u8]) -> anyhow::Result<()> {
-        let packet = decode_raw_packet(packet_data)?;
-
-        match packet {
-            Packet::Connectionless(data) => {
-                let ConnectionlessServerMachineResponse {
-                    response,
-                    challenge,
-                } = connectionless_server_machine(&data, from)?;
-
-                if let Some(response) = response {
-                    self.socket.send_to(&response, from).await?;
-                }
-
-                if let Some(challenge) = challenge {
-                    self.create_connection(from, challenge).await;
-                }
-            }
-            Packet::Regular(data) => {
-                if let Some((_, packet_receiver)) = self.connections.read().await.get(&from) {
-                    packet_receiver.send(data.into_owned())?;
-                } else {
-                    debug!(
-                        "got netchannel message, but no connection with client {:?}",
-                        from
-                    );
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn create_connection(&self, from: SocketAddr, challenge: u32) {
-        let connection = Connection::new(
-            self.socket.clone(),
-            from,
-            NetChannel::new(MessageSide::Server, challenge),
-            self.quickplay.clone(),
-            self.configuration,
-        );
-
-        tokio::task::spawn(Self::remove_dead_connection(
-            connection.0.clone(),
-            Duration::from_millis(self.configuration.server.connection_timeout),
-            from,
-            self.connections.clone(),
-        ));
-        self.connections.write().await.insert(from, connection);
-
-        debug!("created netchannel for client {:?}", from);
-    }
-
-    async fn remove_dead_connection(
-        cancel_token: CancellationToken,
-        timeout: Duration,
-        client_address: SocketAddr,
-        connections: ConnectionMap,
-    ) {
-        tokio::select! {
-            _ = tokio::time::sleep(timeout) => {
-                // The connection has lived for too long, tell the worker to stop
-                cancel_token.cancel();
-            }
-
-            _ = cancel_token.cancelled() => {}
-        }
-
-        connections.write().await.remove(&client_address);
-        debug!("removed dead connection for {client_address:?}")
-    }
-
-    async fn run(&self) {
-        let mut packet_data = vec![0u8; u16::MAX.into()];
+impl Connection for QuickplayConnection {
+    fn run(&mut self) {
         loop {
-            match self.socket.recv_from(&mut packet_data).await {
-                Ok((packet_size, from)) => {
-                    let packet_data = &packet_data[..packet_size];
+            match self.packet_receiver.recv_timeout(self.update_interval) {
+                Ok(packet) => match self.netchannel.read_packet(&packet) {
+                    Ok((messages, _files)) => {
+                        for message in messages {
+                            match self.handle_message(&message) {
+                                Ok(ControlFlow::Continue(_)) => {}
+                                // Function has asked to terminate the connection
+                                Ok(ControlFlow::Break(_)) => return,
+                                Err(err) => trace!("error while handling message {err}"),
+                            };
+                        }
+                    }
+                    Err(err) => trace!("error while decoding messages: {err}"),
+                },
+                // No packets have been received, continue so that we have a
+                // chance to send queued messages.
+                Err(RecvTimeoutError::Timeout) => {}
+                // The channel has been disconnected, terminate the connection.
+                Err(RecvTimeoutError::Disconnected) => return,
+            };
 
-                    if let Err(err) = self.handle_packet(from, packet_data).await {
-                        debug!("error occured while handling packet: {:?}", err);
+            if Instant::now().duration_since(self.creation_time) > self.timeout {
+                trace!("connection has lived too long, destroying");
+                return;
+            }
+
+            match self.netchannel.write_packet(&[]) {
+                Ok(response) => {
+                    if let Err(err) = self.socket.send_to(&response, self.client_addr) {
+                        debug!("error while sending response packet: {err}");
                     }
                 }
                 Err(err) => {
-                    warn!("error occured while receiving packet: {:#?}", err);
+                    debug!("error while creating response packet: {err}");
                 }
             };
         }
     }
 }
 
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
+impl QuickplayConnection {
+    fn handle_message(&mut self, message: &NetMessage) -> anyhow::Result<ControlFlow<()>> {
+        match message {
+            NetMessage::Disconnect(_) => return Ok(ControlFlow::Break(())),
+            NetMessage::SetConVars(message) => self.handle_set_convars(message)?,
+            NetMessage::SignonState(message) => self.handle_signon_state(message)?,
+            _ => {}
+        }
+
+        Ok(ControlFlow::Continue(()))
     }
+
+    fn handle_set_convars(&mut self, message: &SetConVars) -> anyhow::Result<()> {
+        for convar in &message.convars {
+            if let Err(err) = self
+                .quickplay
+                .update_preferences_from_convar(&convar.name, &convar.value)
+            {
+                self.netchannel
+                    .queue_reliable_messages(&[NetMessage::Disconnect(Disconnect {
+                        reason: err,
+                    })])?;
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_signon_state(&mut self, message: &SignonState) -> anyhow::Result<()> {
+        if message.signon_state != 2 {
+            trace!("got unexpected signon state: {}", message.signon_state);
+            return Ok(());
+        }
+
+        let response = match self.quickplay.find_server() {
+            Some(destination_server) => NetMessage::StringCmd(StringCmd {
+                command: format!("redirect {destination_server}"),
+            }),
+            None => NetMessage::Disconnect(Disconnect {
+                reason: "No matches found with selected filter".to_string(),
+            }),
+        };
+        self.netchannel.queue_reliable_messages(&[response])?;
+
+        Ok(())
+    }
+}
+
+fn quickplay_connection_factory(
+    setup_info: ConnectionSetupInfo,
+    quickplay: Arc<QuickplayGlobal>,
+    configuration: &'static Configuration,
+) -> Box<dyn Connection> {
+    Box::new(QuickplayConnection {
+        socket: setup_info.socket,
+        client_addr: setup_info.client_addr,
+        packet_receiver: setup_info.incoming_packets,
+        netchannel: NetChannel::new(MessageSide::Server, setup_info.challenge),
+        quickplay: QuickplaySession::new(quickplay, configuration),
+        creation_time: Instant::now(),
+        update_interval: Duration::from_millis(configuration.server.connection_update_delay),
+        timeout: Duration::from_millis(configuration.server.connection_timeout),
+    })
 }
 
 #[derive(FromArgs)]
@@ -298,8 +157,7 @@ struct Arguments {
     dump_configuration: bool,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let args: Arguments = argh::from_env();
 
@@ -315,10 +173,17 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let configuration = Box::leak(Box::new(configuration));
+    let configuration: &'static Configuration = Box::leak(Box::new(configuration));
 
-    let server = Server::new(configuration).await?;
-    server.run().await;
+    let bind_address = SocketAddr::from_str(&configuration.server.bind_address)?;
+
+    let quickplay = Arc::new(QuickplayGlobal::new(configuration));
+    let quickplay_connection_factory = move |setup_info| {
+        quickplay_connection_factory(setup_info, quickplay.clone(), configuration)
+    };
+
+    let mut server = Server::new(bind_address, Box::new(quickplay_connection_factory))?;
+    server.run();
 
     Ok(())
 }
