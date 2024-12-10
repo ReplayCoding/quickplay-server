@@ -4,4 +4,5 @@ pub mod message;
 pub mod netchannel;
 pub mod netmessage;
 pub mod packet;
+pub mod server;
 pub mod usercmd;

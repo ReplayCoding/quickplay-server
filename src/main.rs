@@ -2,7 +2,6 @@ mod configuration;
 mod io;
 mod net;
 mod quickplay;
-mod server;
 
 use std::net::UdpSocket;
 use std::ops::ControlFlow;
@@ -15,9 +14,9 @@ use configuration::Configuration;
 use net::message::MessageSide;
 use net::netchannel::NetChannel;
 use net::netmessage::{Disconnect, NetMessage, SetConVars, SignonState, StringCmd};
+use net::server::{Connection, ConnectionSetupInfo, Server};
 use quickplay::global::QuickplayGlobal;
 use quickplay::session::QuickplaySession;
-use server::{Connection, ConnectionSetupInfo, Server};
 
 use tracing::debug;
 pub use tracing::{info, trace, warn};
