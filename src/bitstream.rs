@@ -192,7 +192,7 @@ impl BitWriter {
         }
     }
 
-    fn set_position(&mut self, position: usize) -> Result<(), BitStreamError> {
+    pub fn set_position(&mut self, position: usize) -> Result<(), BitStreamError> {
         self.flush_all();
 
         // NOTE: Since flush_all byte aligns the stream, this allows seeks
