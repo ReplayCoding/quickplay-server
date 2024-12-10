@@ -1,5 +1,10 @@
 use thiserror::Error;
 
+use super::{
+    string::{read_string, write_string},
+    varint::{read_varint32, write_varint32},
+};
+
 type Cache = u64;
 type HalfCache = u32;
 const _: () = assert!(
@@ -46,6 +51,8 @@ pub enum BitStreamError {
     OutOfBoundsSeek,
     #[error("Value cannot fit into specified number of bits")]
     ValueTooLarge,
+    #[error("Invalid UTF-8")]
+    InvalidUtf8,
 }
 
 pub struct BitReader<'a> {
@@ -146,6 +153,14 @@ impl<'a> BitReader<'a> {
         }
 
         Ok(Type::from_half_cache(self.drain_cache(BITS)))
+    }
+
+    pub fn read_string(&mut self, max_len: usize) -> Result<String, BitStreamError> {
+        read_string(self, max_len)
+    }
+
+    pub fn read_varint32(&mut self) -> Result<u32, BitStreamError> {
+        read_varint32(self)
     }
 }
 
@@ -303,6 +318,14 @@ impl BitWriter {
         }
 
         Ok(())
+    }
+
+    pub fn write_string(&mut self, string: &str) -> Result<(), BitStreamError> {
+        write_string(self, string)
+    }
+
+    pub fn write_varint32(&mut self, value: u32) -> Result<(), BitStreamError> {
+        write_varint32(self, value)
     }
 
     pub fn into_bytes(mut self) -> Vec<u8> {

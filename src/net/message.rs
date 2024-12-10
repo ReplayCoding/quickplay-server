@@ -1,4 +1,4 @@
-use crate::bitstream::{BitReader, BitWriter};
+use crate::io::bitstream::{BitReader, BitWriter};
 
 /// The sides that a message may be sent from
 #[derive(Clone, Copy, PartialEq, Debug)]

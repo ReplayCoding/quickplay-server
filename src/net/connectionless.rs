@@ -5,10 +5,7 @@
 use strum::EnumDiscriminants;
 use thiserror::Error;
 
-use crate::{
-    bitstream::{BitReader, BitStreamError, BitWriter},
-    io_util::{read_string, write_string},
-};
+use crate::io::bitstream::{BitReader, BitStreamError, BitWriter};
 
 use super::{
     message::{Message, MessageSide},
@@ -85,13 +82,13 @@ impl Message<ConnectionlessError> for C2S_Connect {
         let auth_protocol: u32 = reader.read_in::<32, _>()?;
         let server_challenge: u32 = reader.read_in::<32, _>()?;
         let client_challenge: u32 = reader.read_in::<32, _>()?;
-        let name = read_string(reader, 256)?;
-        let password = read_string(reader, 256)?;
-        let product_version = read_string(reader, 32)?;
+        let name = reader.read_string(256)?;
+        let password = reader.read_string(256)?;
+        let product_version = reader.read_string(32)?;
 
         let auth_protocol = match auth_protocol {
-            1 => AuthProtocol::AuthCertificate(read_string(reader, 2048)?),
-            2 => AuthProtocol::HashedCdKey(read_string(reader, 2048)?),
+            1 => AuthProtocol::AuthCertificate(reader.read_string(2048)?),
+            2 => AuthProtocol::HashedCdKey(reader.read_string(2048)?),
             3 => {
                 let key_len = reader.read_in::<16, u16>()?;
                 if key_len > 2048 {
@@ -126,9 +123,9 @@ impl Message<ConnectionlessError> for C2S_Connect {
         })?;
         writer.write_out::<32, _>(self.server_challenge)?;
         writer.write_out::<32, _>(self.client_challenge)?;
-        write_string(writer, &self.name)?;
-        write_string(writer, &self.password)?;
-        write_string(writer, &self.product_version)?;
+        writer.write_string(&self.name)?;
+        writer.write_string(&self.password)?;
+        writer.write_string(&self.product_version)?;
 
         match &self.auth_protocol {
             AuthProtocol::AuthCertificate(_) => todo!(),
@@ -223,7 +220,7 @@ impl Message<ConnectionlessError> for S2C_Connection {
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.client_challenge)?;
-        write_string(writer, "0000000000")?; // padding
+        writer.write_string("0000000000")?; // padding
 
         Ok(())
     }
@@ -249,7 +246,7 @@ impl Message<ConnectionlessError> for S2C_ConnReject {
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {
         writer.write_out::<32, _>(self.client_challenge)?;
-        write_string(writer, &self.message)?;
+        writer.write_string(&self.message)?;
 
         Ok(())
     }

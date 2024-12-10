@@ -1,6 +1,5 @@
-mod bitstream;
 mod configuration;
-mod io_util;
+mod io;
 mod net;
 mod quickplay;
 mod server;

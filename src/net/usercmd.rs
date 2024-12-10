@@ -1,4 +1,4 @@
-use crate::bitstream::{BitReader, BitStreamError};
+use crate::io::bitstream::{BitReader, BitStreamError};
 
 /// A single UserCmd. UserCmds are delta-compressed, so all of these are
 /// Option<_>.

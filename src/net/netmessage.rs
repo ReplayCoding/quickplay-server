@@ -1,9 +1,6 @@
 use thiserror::Error;
 
-use crate::{
-    bitstream::{BitReader, BitStreamError, BitWriter},
-    io_util::{read_string, write_string},
-};
+use crate::io::bitstream::{BitReader, BitStreamError, BitWriter};
 
 use super::{
     message::{Message, MessageSide},
@@ -54,7 +51,7 @@ impl Message<NetMessageError> for Disconnect {
     where
         Self: Sized,
     {
-        let reason = read_string(reader, 1024)?;
+        let reason = reader.read_string(1024)?;
         Ok(Self { reason })
     }
 
@@ -62,7 +59,7 @@ impl Message<NetMessageError> for Disconnect {
     where
         Self: Sized,
     {
-        write_string(writer, &self.reason)?;
+        writer.write_string(&self.reason)?;
         Ok(())
     }
 }
@@ -80,12 +77,12 @@ impl Message<NetMessageError> for StringCmd {
     where
         Self: Sized,
     {
-        let command = read_string(reader, 1024)?;
+        let command = reader.read_string(1024)?;
         Ok(Self { command })
     }
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
-        write_string(writer, &self.command)?;
+        writer.write_string(&self.command)?;
         Ok(())
     }
 }
@@ -112,8 +109,8 @@ impl Message<NetMessageError> for SetConVars {
         let num_convars = reader.read_in::<8, u8>()?;
         let mut convars = vec![];
         for _ in 0..num_convars {
-            let name = read_string(reader, 260)?;
-            let value = read_string(reader, 260)?;
+            let name = reader.read_string(260)?;
+            let value = reader.read_string(260)?;
             convars.push(ConVar { name, value });
         }
         Ok(Self { convars })
@@ -125,8 +122,8 @@ impl Message<NetMessageError> for SetConVars {
 
         writer.write_out::<8, u8>(num_convars)?;
         for convar in &self.convars {
-            write_string(writer, &convar.name)?;
-            write_string(writer, &convar.value)?;
+            writer.write_string(&convar.name)?;
+            writer.write_string(&convar.value)?;
         }
 
         Ok(())
@@ -176,12 +173,12 @@ impl Message<NetMessageError> for Print {
     where
         Self: Sized,
     {
-        let text = read_string(reader, 2048)?;
+        let text = reader.read_string(2048)?;
         Ok(Self { text })
     }
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
-        write_string(writer, &self.text)?;
+        writer.write_string(&self.text)?;
         Ok(())
     }
 }
@@ -207,7 +204,7 @@ impl Message<NetMessageError> for File {
         Self: Sized,
     {
         let transfer_id = reader.read_in::<32, u32>()?;
-        let filename = read_string(reader, 1024)?;
+        let filename = reader.read_string(1024)?;
         let mode = if reader.read_bit()? {
             FileMode::Request
         } else {
@@ -223,7 +220,7 @@ impl Message<NetMessageError> for File {
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
         writer.write_out::<32, u32>(self.transfer_id)?;
-        write_string(writer, &self.filename)?;
+        writer.write_string(&self.filename)?;
         writer.write_bit(self.mode == FileMode::Request)?;
         Ok(())
     }
@@ -284,10 +281,10 @@ impl Message<NetMessageError> for ServerInfo {
         let tick_interval = f32::from_bits(reader.read_in::<32, u32>()?);
         let os = reader.read_in::<8, u8>()?;
 
-        let game_dir = read_string(reader, 260)?;
-        let map_name = read_string(reader, 260)?;
-        let sky_name = read_string(reader, 260)?;
-        let host_name = read_string(reader, 260)?;
+        let game_dir = reader.read_string(260)?;
+        let map_name = reader.read_string(260)?;
+        let sky_name = reader.read_string(260)?;
+        let host_name = reader.read_string(260)?;
 
         // FIXME: This has some checks for the netchannel protocol version...
         // Maybe have some way to check here?

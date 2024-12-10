@@ -1,9 +1,6 @@
 use std::{collections::VecDeque, ops::Range};
 
-use crate::{
-    bitstream::{BitReader, BitStreamError, BitWriter},
-    io_util,
-};
+use crate::io::bitstream::{BitReader, BitStreamError, BitWriter};
 
 use super::{
     compression::{self, CompressionError},
@@ -412,7 +409,7 @@ impl Subchannel {
                 writer.write_bit(false)?;
             }
 
-            io_util::write_varint32(writer, transfer.size())?;
+            writer.write_varint32(transfer.size())?;
         } else {
             writer.write_out::<{ MAX_FILE_SIZE_BITS - FRAGMENT_BITS }, _>(fragments.start)?;
             writer.write_out::<SUBCHANNEL_FRAGMENT_COUNT_BITS, _>(fragments.length)?;
@@ -427,7 +424,7 @@ impl Subchannel {
                     } => {
                         writer.write_bit(true)?;
                         writer.write_out::<32, _>(*transfer_id)?;
-                        io_util::write_string(writer, filename)?;
+                        writer.write_string(filename)?;
                     }
                 }
 
@@ -548,7 +545,7 @@ impl IncomingReliableTransfer {
             // Is it a file?
             if reader.read_bit()? {
                 let transfer_id = reader.read_in::<32, u32>()?;
-                let filename = io_util::read_string(reader, PATH_OSMAX)?;
+                let filename = reader.read_string(PATH_OSMAX)?;
 
                 transfer_type = TransferType::File {
                     transfer_id,
@@ -572,7 +569,7 @@ impl IncomingReliableTransfer {
 
             // Single block transfer can't be file transfers.
             transfer_type = TransferType::Message;
-            bytes = io_util::read_varint32(reader)?;
+            bytes = reader.read_varint32()?;
         }
 
         if bytes > MAX_FILE_SIZE {
@@ -1150,8 +1147,6 @@ fn write_checksum(packet_bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use io_util::{write_string, write_varint32};
-
     use super::*;
 
     #[test]
@@ -1280,7 +1275,7 @@ mod tests {
         writer.write_bit(true).unwrap(); // is compressed
         writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
 
-        write_varint32(&mut writer, 1234).unwrap(); // size
+        writer.write_varint32(1234).unwrap(); // size
 
         let data = writer.into_bytes();
         let mut reader = BitReader::new(&data);
@@ -1299,7 +1294,7 @@ mod tests {
         writer.write_bit(true).unwrap(); // is file
         writer.write_out::<32, u32>(9999).unwrap();
         const FILENAME: &str = "very real filename.txt";
-        write_string(&mut writer, FILENAME).unwrap();
+        writer.write_string(FILENAME).unwrap();
 
         writer.write_bit(true).unwrap(); // is compressed
         writer.write_out::<MAX_FILE_SIZE_BITS, u32>(5678).unwrap(); // uncompressed size
