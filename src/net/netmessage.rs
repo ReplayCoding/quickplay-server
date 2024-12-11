@@ -15,6 +15,8 @@ pub enum NetMessageError {
     UnknownMessage(u8, MessageSide),
     #[error("too many convars: {0}")]
     TooManyConVars(usize),
+    #[error("usercmds too large to write length")]
+    UserCmdsTooLarge,
     #[error("bitstream error: {0}")]
     BitStream(#[from] BitStreamError),
 }
@@ -345,7 +347,14 @@ impl Message<NetMessageError> for Tick {
     }
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
-        todo!()
+        writer.write_out::<32, u32>(self.tick)?;
+        // intentionally truncated
+        writer.write_out::<16, u16>((f32::from(self.host_frametime) * NET_TICK_SCALEUP) as u16)?;
+        writer.write_out::<16, u16>(
+            (f32::from(self.host_frametime_stddev) * NET_TICK_SCALEUP) as u16,
+        )?;
+
+        Ok(())
     }
 }
 
@@ -392,7 +401,21 @@ impl Message<NetMessageError> for Move {
     }
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
-        todo!()
+        writer.write_out::<NUM_NEW_COMMAND_BITS, u8>(self.new_commands)?;
+        writer.write_out::<NUM_BACKUP_COMMAND_BITS, u8>(self.backup_commands)?;
+        let length_pos = writer.position();
+        writer.write_out::<16, u16>(0xFFFF)?; // write out a dummy value, which will be overwritten later
+
+        for cmd in &self.commands {
+            cmd.write(writer)?;
+        }
+
+        let length = u16::try_from(writer.position() - length_pos)
+            .map_err(|_| NetMessageError::UserCmdsTooLarge)?;
+        writer.set_position(length_pos)?;
+        writer.write_out::<16, u16>(length)?;
+
+        Ok(())
     }
 }
 

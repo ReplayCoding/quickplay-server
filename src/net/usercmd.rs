@@ -1,4 +1,4 @@
-use crate::io::bitstream::{BitReader, BitStreamError};
+use crate::io::bitstream::{BitReader, BitStreamError, BitWriter};
 
 /// A single UserCmd. UserCmds are delta-compressed, so all of these are
 /// Option<_>.
@@ -31,6 +31,19 @@ macro_rules! read_optional {
             Some($fill)
         } else {
             None
+        }
+    };
+}
+
+/// Write an optional field. The first bit in the stream signifies if the field
+/// exists or not.
+macro_rules! write_optional {
+    ($writer:ident, $value:expr, $renamed:ident => $fill: expr) => {
+        if let Some($renamed) = $value {
+            $writer.write_bit(true)?;
+            $fill
+        } else {
+            $writer.write_bit(false)?;
         }
     };
 }
@@ -79,5 +92,44 @@ impl UserCmd {
             mouse_dx,
             mouse_dy,
         })
+    }
+
+    pub fn write(&self, writer: &mut BitWriter) -> Result<(), BitStreamError> {
+        write_optional!(
+            writer,
+            self.command_nr,
+            command_nr => writer.write_out::<32, u32>(command_nr)?
+        );
+
+        write_optional!(
+            writer,
+            self.tick_count,
+            tick_count => writer.write_out::<32, u32>(tick_count)?
+        );
+
+        for angle in &self.viewangles {
+            write_optional!(
+                writer,
+                *angle,
+                angle => writer.write_out::<32, _>(angle.to_bits())?
+            );
+        }
+
+        write_optional!(writer, self.forward_move, forward_move => writer.write_out::<32, _>(forward_move.to_bits())?);
+        write_optional!(writer, self.side_move, side_move => writer.write_out::<32, _>(side_move.to_bits())?);
+        write_optional!(writer, self.up_move, up_move => writer.write_out::<32, _>(up_move.to_bits())?);
+
+        write_optional!(writer, self.buttons, buttons => writer.write_out::<32, u32>(buttons)?);
+        write_optional!(writer, self.impulse, impulse => writer.write_out::<8, u8>(impulse)?);
+
+        write_optional!(writer, &self.weapon_select, weapon_select => {
+            writer.write_out::<MAX_EDICT_BITS, u16>(weapon_select.weapon)?;
+            write_optional!(writer, weapon_select.subtype, subtype => writer.write_out::<WEAPON_SUBTYPE_BITS, u8>(subtype)?);
+        });
+
+        write_optional!(writer, self.mouse_dx, mouse_dx => writer.write_out::<16, u16>(mouse_dx)?);
+        write_optional!(writer, self.mouse_dy, mouse_dy => writer.write_out::<16, u16>(mouse_dy)?);
+
+        Ok(())
     }
 }
