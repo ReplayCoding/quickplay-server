@@ -657,8 +657,9 @@ impl IncomingReliableTransfer {
         Ok((
             self.transfer_type,
             match self.uncompressed_size {
-                Some(_uncompressed_size) => {
-                    compression::decompress(&self.buffer).map_err(NetChannelError::Compression)?
+                Some(uncompressed_size) => {
+                    compression::decompress(&self.buffer, Some(uncompressed_size))
+                        .map_err(NetChannelError::Compression)?
                 }
                 // No compression, just use the buffer as-is
                 None => self.buffer,

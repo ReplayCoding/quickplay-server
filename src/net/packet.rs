@@ -35,8 +35,8 @@ pub fn decode_raw_packet(packet_data: &[u8]) -> Result<Packet, PacketDecoderErro
 
     let packet_data = if header_flags == COMPRESSEDPACKET_HEADER.to_le_bytes() {
         // Slice is safe because header_flags is 4 bytes long
-        let decompressed_packet =
-            compression::decompress(&packet_data[4..]).map_err(PacketDecoderError::Compression)?;
+        let decompressed_packet = compression::decompress(&packet_data[4..], None)
+            .map_err(PacketDecoderError::Compression)?;
 
         Cow::Owned(decompressed_packet)
     } else {

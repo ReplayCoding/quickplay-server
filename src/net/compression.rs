@@ -8,15 +8,15 @@ pub enum CompressionError {
     UnhandledCompressionType([u8; 4]),
     #[error("no compressed data found")]
     NoCompressedData,
-    #[error("snappy error: {0:?}")]
-    Snappy(snap::Error),
-    #[error("buffer of size {0} is too large to compress")]
+    #[error("buffer of size {0} is too large")]
     TooLarge(usize),
+    #[error("snappy error: {0:?}")]
+    Snappy(#[from] snap::Error),
 }
 
 const COMPRESSION_SNAPPY: &[u8] = b"SNAP";
 
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
+pub fn decompress(data: &[u8], max_size: Option<u32>) -> Result<Vec<u8>, CompressionError> {
     let compression_type = data.get(0..4).ok_or(CompressionError::NoCompressionType)?;
 
     match compression_type {
@@ -24,9 +24,19 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, CompressionError> {
             let compressed_data = data.get(4..).ok_or(CompressionError::NoCompressedData)?;
 
             let mut decoder = snap::raw::Decoder::new();
-            decoder
-                .decompress_vec(compressed_data)
-                .map_err(CompressionError::Snappy)
+            let decompressed_size = snap::raw::decompress_len(compressed_data)?;
+            if let Some(max_size) = max_size {
+                // decompress_len will return an error if the size exceeds
+                // 2^32-1, so this will always fit into a u32
+                if decompressed_size as u32 > max_size {
+                    return Err(CompressionError::TooLarge(decompressed_size));
+                }
+            }
+
+            let mut decompressed_data = vec![0u8; decompressed_size];
+            decoder.decompress(compressed_data, &mut decompressed_data)?;
+
+            Ok(decompressed_data)
         }
 
         _ => Err(CompressionError::UnhandledCompressionType(
