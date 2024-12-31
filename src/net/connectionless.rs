@@ -241,7 +241,13 @@ impl Message<ConnectionlessError> for S2C_ConnReject {
     where
         Self: Sized,
     {
-        todo!()
+        let client_challenge = reader.read_in::<32, u32>()?;
+        let message = reader.read_string(1260)?;
+
+        Ok(Self {
+            client_challenge,
+            message,
+        })
     }
 
     fn write(&self, writer: &mut BitWriter) -> Result<(), ConnectionlessError> {

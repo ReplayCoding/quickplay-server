@@ -28,14 +28,14 @@ impl Message<NetMessageError> for Nop {
     const TYPE: u8 = 0;
     const SIDE: MessageSide = MessageSide::Any;
 
-    fn read(reader: &mut BitReader) -> Result<Self, NetMessageError>
+    fn read(_reader: &mut BitReader) -> Result<Self, NetMessageError>
     where
         Self: Sized,
     {
         Ok(Self)
     }
 
-    fn write(&self, writer: &mut BitWriter) -> Result<(), NetMessageError> {
+    fn write(&self, _writer: &mut BitWriter) -> Result<(), NetMessageError> {
         Ok(())
     }
 }
